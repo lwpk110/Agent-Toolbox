@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风格 F · Ant Design 式 · Agent-Toolbox</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared/base.css">
+<style>
+:root {
+  --bg: #f5f5f5; --panel: #001529; --surface: #ffffff; --hover: #f5f5f5;
+  --line: #f0f0f0; --line-2: #d9d9d9;
+  --ink: rgba(0,0,0,0.88); --ink-2: rgba(0,0,0,0.65); --ink-3: rgba(0,0,0,0.50);
+  --accent: #1677ff; --accent-hover: #4096ff; --accent-ink: #1677ff; --accent-soft: #e6f4ff; --on-accent: #fff;
+  --ok: #389e0d; --ok-dot: #52c41a; --warn: #d46b08; --bad: #cf1322;
+  --code-bg: #fafafa;
+  --f-display: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --f-body: var(--f-display);
+  --f-mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+  --h-weight: 600; --h-track: 0; --nav-weight: 500; --btn-weight: 400; --num-weight: 600;
+  --f-num: var(--f-display);
+  --r-btn: 6px; --r-input: 6px; --r-card: 8px; --r-chip: 6px;
+  --card-border: 0; --card-shadow: 0 1px 2px rgba(0,0,0,0.03), 0 1px 6px -1px rgba(0,0,0,0.02), 0 2px 4px rgba(0,0,0,0.02);
+  --btn2-bg: #fff; --btn2-shadow: 0 2px 0 rgba(0,0,0,0.02); --btn-h: 32px; --pad-card: 24px; --gap: 16px;
+  --top-bg: #ffffff; --side-bg: #001529; --side-on-bg: #1677ff; --side-on-ink: #fff; --side-on-shadow: none;
+  --seg-bg: #f5f5f5; --seg-on-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 1px 4px -1px rgba(0,0,0,0.04);
+  --ds-page: #e8e8e8;
+}
+.app .btn.pri { box-shadow: 0 2px 0 rgba(5,145,255,0.1); }
+@media (hover: hover) { .app .btn:not(.pri):hover { color: #4096ff; border-color: #4096ff; background: #fff; } }
+.app-top { box-shadow: 0 1px 4px rgba(0,21,41,0.08); border-bottom: 0; position: relative; z-index: 1; }
+.app .side { border-right: 0; }
+.app .side .cap { color: rgba(255,255,255,0.45); }
+.app .side a { color: rgba(255,255,255,0.65); }
+.app .side a[aria-current="true"] { font-weight: 400; }
+@media (hover: hover) { .app .side a:not([aria-current="true"]):hover { background: transparent; color: #fff; } }
+.app .host { color: rgba(255,255,255,0.85); }
+.app .host .mono { color: rgba(255,255,255,0.45) !important; }
+.app .page-h h1 { font-size: 20px; }
+.app .page-h { background: #fff; margin: -24px -32px 0; padding: 16px 32px; }
+.app .kpi .cap { font-size: 14px; color: rgba(0,0,0,0.45); }
+.app .kpi-n { font-size: 30px; font-weight: 400; }
+.app .sec-h h2 { font-size: 16px; }
+.app .tabs a[aria-current="page"] { color: #1677ff; }
+.app .pipe > div { border-color: #f0f0f0; }
+</style>
+</head>
+<body>
+<header class="ds-bar"><div class="ds-title"><b>风格 F · Ant Design 式：国内企业中后台</b><span>深蓝侧栏 + 品牌蓝，灰底白卡片，组件感强</span></div>
+<a href="index.html">返回总览</a><a href="supabase.html">上一套</a><a href="original.html">下一套</a></header>
+<main class="ds-wrap">
+  <div class="frame"><div data-cockpit></div></div>
+  <section class="traits" aria-label="风格特点">
+    <div><b>色彩</b><p>品牌蓝 #1677FF，深海蓝侧栏 #001529 + 选中项蓝色块；页面浅灰 #F5F5F5，内容放在白卡片里。</p></div>
+    <div><b>字体</b><p>系统字体栈，中文优先苹方 / 微软雅黑；文字用黑色透明度分出 88% / 65% / 45% 三级。</p></div>
+    <div><b>形态</b><p>圆角 6–8px，卡片用极淡投影浮在灰底上；按钮悬停时边框和文字变蓝。</p></div>
+    <div><b>适合</b><p>国内团队和企业用户最熟悉的"标准后台"，上手成本最低，组件生态最齐全。</p></div>
+    <div class="note"><b>取值说明</b><p>设计库里 Ant 的两份规范色值冲突（一份是蓝，一份是红）。这里按 Ant Design 官方主色蓝 #1677FF 取值。</p></div>
+  </section>
+</main>
+<script src="shared/cockpit.js"></script>
+</body>
+</html>

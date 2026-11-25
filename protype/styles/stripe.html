@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风格 A · Stripe 式 · Agent-Toolbox</title>
+<link href="https://fonts.googleapis.com/css2?family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared/base.css">
+<style>
+:root {
+  --bg: #f6f9fc; --panel: #ffffff; --surface: #ffffff; --hover: #f6f9fc;
+  --line: #e5edf5; --line-2: #d6e0eb;
+  --ink: #061b31; --ink-2: #273951; --ink-3: #64748d;
+  --accent: #533afd; --accent-hover: #4434d4; --accent-ink: #533afd; --accent-soft: #f2f0ff; --on-accent: #fff;
+  --ok: #108c3d; --ok-dot: #15be53; --warn: #9b6829; --bad: #c41a51;
+  --code-bg: #f6f9fc;
+  --f-display: "Söhne", "SF Pro Display", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --f-body: var(--f-display);
+  --f-mono: "Source Code Pro", "SF Mono", ui-monospace, monospace;
+  --f-features: "ss01", "tnum";
+  --h-weight: 400; --h-track: -0.02em; --nav-weight: 400; --btn-weight: 400; --num-weight: 300;
+  --f-num: var(--f-display);
+  --r-btn: 4px; --r-input: 4px; --r-card: 6px; --r-chip: 4px;
+  --card-border: 1px solid #e5edf5;
+  --card-shadow: rgba(50,50,93,0.12) 0px 13px 27px -18px, rgba(0,0,0,0.06) 0px 8px 16px -8px;
+  --btn2-bg: #fff; --btn-h: 32px; --pad-card: 20px; --gap: 16px;
+  --side-bg: #ffffff; --side-on-bg: #f2f0ff; --side-on-ink: #533afd; --side-on-shadow: none;
+  --seg-on-bg: #533afd; --seg-on-ink: #fff; --seg-on-shadow: none;
+  --ds-page: #e9eef4;
+}
+.app .page-h h1 { font-size: 28px; font-weight: 300; letter-spacing: -0.64px; }
+.app .kpi-n { font-size: 34px; letter-spacing: -0.03em; }
+.app .btn.pri { box-shadow: rgba(50,50,93,0.25) 0 6px 12px -6px, rgba(0,0,0,0.1) 0 3px 7px -3px; }
+.app .btn:not(.pri) { color: #533afd; border-color: #b9b9f9; }
+@media (hover: hover) { .app .btn:not(.pri):hover { background: rgba(83,58,253,0.05); border-color: #533afd; } }
+.app .tabs a[aria-current="page"] { box-shadow: none; color: #533afd; }
+</style>
+</head>
+<body>
+<header class="ds-bar"><div class="ds-title"><b>风格 A · Stripe 式：精致金融科技</b><span>白底 + 靛紫强调，细字重大标题，蓝调柔和投影</span></div>
+<a href="index.html">返回总览</a><a href="original.html">上一套</a><a href="linear.html">下一套</a></header>
+<main class="ds-wrap">
+  <div class="frame"><div data-cockpit></div></div>
+  <section class="traits" aria-label="风格特点">
+    <div><b>色彩</b><p>浅蓝灰底 #F6F9FC，深海军蓝文字 #061B31 代替纯黑；靛紫 #533AFD 只用在主按钮和选中态。</p></div>
+    <div><b>字体</b><p>大标题和数字用 300 细字重，字距收紧；等宽字体用 Source Code Pro。</p></div>
+    <div><b>形态</b><p>圆角统一 4–6px，卡片用带蓝调的分层柔和投影营造轻盈的层次感。</p></div>
+    <div><b>适合</b><p>想要高级、可信、偏商业产品的气质；和文档原有靛蓝方案最接近，改动最小。</p></div>
+    <div class="note"><b>字体说明</b><p>原规范的 Söhne 是商业字体，这里回退到系统 SF Pro / Segoe UI / 苹方。</p></div>
+  </section>
+</main>
+<script src="shared/cockpit.js"></script>
+</body>
+</html>

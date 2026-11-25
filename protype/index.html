@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent-Toolbox 管理控制台</title>
+<link rel="stylesheet" href="assets/app.css">
+</head>
+<body>
+<header class="top">
+  <span class="brand" aria-label="Agent-Toolbox"><svg class="od-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="8" y="8" width="8" height="8" rx="1.5"/><path d="M12 2v6M12 16v6M2 12h6M16 12h6"/></svg><span>Agent-Toolbox</span></span>
+  <nav class="nav" id="nav" aria-label="主导航"></nav>
+  <button class="btn pri" type="button" id="syncBtn"></button>
+</header>
+<div class="layout">
+  <aside class="side" id="side" aria-label="本页内容与宿主状态"></aside>
+  <main class="main" id="main" tabindex="-1"></main>
+</div>
+
+<dialog class="dlg" id="dlg" aria-labelledby="dlgTitle">
+  <div class="dlg-h" id="dlgTitle"></div>
+  <div class="dlg-b" id="dlgBody"></div>
+  <div class="dlg-f">
+    <button class="btn" type="button" id="dlgCancel">取消</button>
+    <button class="btn" type="button" id="dlgOk"></button>
+  </div>
+</dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="assets/data.js"></script>
+<script src="assets/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风格 C · Vercel 式 · Agent-Toolbox</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared/base.css">
+<style>
+:root {
+  --bg: #fafafa; --panel: #ffffff; --surface: #ffffff; --hover: #f2f2f2;
+  --line: #ebebeb; --line-2: #d4d4d4;
+  --ink: #171717; --ink-2: #4d4d4d; --ink-3: #666666;
+  --accent: #171717; --accent-hover: #383838; --accent-ink: #0068d6; --accent-soft: #ebf5ff; --on-accent: #fff;
+  --ok: #15803d; --ok-dot: #16a34a; --warn: #a16207; --bad: #dc2626;
+  --code-bg: #fafafa;
+  --f-display: "Geist", -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --f-body: var(--f-display);
+  --f-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
+  --f-features: "liga";
+  --h-weight: 600; --h-track: -0.02em; --nav-weight: 500; --btn-weight: 500; --num-weight: 600;
+  --r-btn: 6px; --r-input: 6px; --r-card: 8px; --r-chip: 6px;
+  --card-border: 0; --card-shadow: 0 0 0 1px rgba(0,0,0,0.08), 0 2px 2px rgba(0,0,0,0.04), 0 8px 8px -8px rgba(0,0,0,0.04);
+  --btn2-bg: #fff; --btn2-shadow: none; --btn-h: 32px; --pad-card: 20px; --gap: 16px;
+  --side-bg: #fafafa; --side-on-bg: #fff; --side-on-shadow: 0 0 0 1px rgba(0,0,0,0.08);
+  --tab-mark: #171717; --brand-mark: #171717;
+  --cap-font: var(--f-mono); --cap-case: uppercase; --cap-track: 0.04em;
+  --ds-page: #ededed;
+}
+.app .page-h h1 { font-size: 28px; letter-spacing: -1.12px; }
+.app .kpi-n { font-size: 32px; letter-spacing: -1.28px; font-family: var(--f-display); }
+.app .cap { font-size: 11px; }
+.app .btn:not(.pri) { border-color: transparent; box-shadow: 0 0 0 1px #ebebeb; }
+@media (hover: hover) { .app .btn:not(.pri):hover { border-color: transparent; box-shadow: 0 0 0 1px #a3a3a3; } }
+.app .tabs a { color: #666; }
+.app .tabs a[aria-current="page"] { color: #171717; font-weight: 600; }
+.app .topo svg path[style*="--accent"] { stroke-width: 1.5; }
+</style>
+</head>
+<body>
+<header class="ds-bar"><div class="ds-title"><b>风格 C · Vercel 式：黑白极简</b><span>纯黑白灰，阴影描边代替边框，几乎不用彩色</span></div>
+<a href="index.html">返回总览</a><a href="linear.html">上一套</a><a href="github.html">下一套</a></header>
+<main class="ds-wrap">
+  <div class="frame"><div data-cockpit></div></div>
+  <section class="traits" aria-label="风格特点">
+    <div><b>色彩</b><p>主按钮是近黑 #171717，没有品牌彩色；只有状态（绿 / 黄 / 红）和链接蓝带色，信息一眼突出。</p></div>
+    <div><b>字体</b><p>Geist + Geist Mono（开源），600 字重大标题，字距大幅收紧；小标签用等宽大写。</p></div>
+    <div><b>形态</b><p>不用 CSS 边框，改用 1px 阴影环 + 极淡投影，界面轻、干净、锐利。</p></div>
+    <div><b>适合</b><p>最典型的"开发者平台大厂感"，内容和数据就是视觉主角。</p></div>
+  </section>
+</main>
+<script src="shared/cockpit.js"></script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>风格 D · GitHub 式 · Agent-Toolbox</title>
+<link rel="stylesheet" href="shared/base.css">
+<style>
+:root {
+  --bg: #ffffff; --panel: #f6f8fa; --surface: #ffffff; --hover: #f3f4f6;
+  --line: #d0d7de; --line-2: #d0d7de;
+  --ink: #1f2328; --ink-2: #656d76; --ink-3: #656d76;
+  --accent: #0969da; --accent-hover: #0550ae; --accent-ink: #0969da; --accent-soft: #ddf4ff; --on-accent: #fff;
+  --pri-bg: #1f883d; --pri-bg-hover: #1a7f37; --pri-ink: #fff; --pri-border: rgba(31,35,40,0.15);
+  --ok: #1a7f37; --ok-dot: #1a7f37; --warn: #9a6700; --bad: #cf222e;
+  --code-bg: #f6f8fa;
+  --f-display: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", "PingFang SC", "Microsoft YaHei", Helvetica, Arial, sans-serif;
+  --f-body: var(--f-display);
+  --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --h-weight: 600; --h-track: 0; --nav-weight: 600; --btn-weight: 500; --num-weight: 600;
+  --r-btn: 6px; --r-input: 6px; --r-card: 6px; --r-chip: 6px;
+  --card-border: 1px solid #d0d7de; --card-shadow: none;
+  --btn2-bg: #f6f8fa; --btn2-shadow: 0 1px 0 rgba(31,35,40,0.04); --btn-h: 32px; --pad-card: 16px; --gap: 16px;
+  --top-bg: #f6f8fa; --side-bg: #ffffff; --side-on-bg: #f6f8fa; --side-on-shadow: inset 2px 0 0 #fd8c73;
+  --tab-mark: #fd8c73; --brand-mark: #1f2328;
+  --ds-page: #e6e9ec;
+}
+.app .page-h h1 { font-size: 24px; }
+.app .kpi-n { font-size: 26px; }
+.app .btn.pri { box-shadow: 0 1px 0 rgba(31,35,40,0.1); font-weight: 500; }
+.app .card.panel h3, .app .card.entry .cap { font-weight: 600; }
+.app .card.panel { padding: 0; gap: 0; }
+.app .card.panel > h3 { background: #f6f8fa; padding: 12px 16px; border-bottom: 1px solid #d0d7de; border-radius: 6px 6px 0 0; }
+.app .card.panel > :not(h3) { margin: 12px 16px; }
+.app .card.panel > div:first-of-type .scope-row { padding: 10px 0; border-color: #eaeef2; }
+.app .tabs a { color: #1f2328; font-weight: 400; }
+.app .tabs a[aria-current="page"] { font-weight: 600; }
+.app .side a { color: #1f2328; }
+.app .seg button[aria-pressed="true"] { box-shadow: 0 0 0 1px #d0d7de; }
+</style>
+</head>
+<body>
+<header class="ds-bar"><div class="ds-title"><b>风格 D · GitHub 式：开发者熟悉的高密度</b><span>中性灰白，带标题条的边框盒子，绿色主按钮</span></div>
+<a href="index.html">返回总览</a><a href="vercel.html">上一套</a><a href="supabase.html">下一套</a></header>
+<main class="ds-wrap">
+  <div class="frame"><div data-cockpit></div></div>
+  <section class="traits" aria-label="风格特点">
+    <div><b>色彩</b><p>白底 + #F6F8FA 浅灰条，蓝色 #0969DA 只用于链接和焦点；"建设性"主操作用绿色 #1F883D，当前导航用橙色下划线。</p></div>
+    <div><b>字体</b><p>直接用系统字体，不加载网络字体；只有 400 / 600 两种字重。</p></div>
+    <div><b>形态</b><p>所有圆角 6px，每个面板都是带灰色标题条的描边盒子，基本不用阴影。</p></div>
+    <div><b>适合</b><p>指纹、Diff、Lockfile、仓库同步这些概念，开发者看到会觉得最"顺手"。</p></div>
+  </section>
+</main>
+<script src="shared/cockpit.js"></script>
+</body>
+</html>
