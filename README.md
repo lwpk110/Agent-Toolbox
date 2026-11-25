@@ -1,11 +1,8 @@
-<div align="center">
+# Agent-Toolbox
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+面向 **Antigravity**、**Claude Code**、**Codex CLI**、**OpenCode** 的本地优先（Local-First）统一 MCP 网关、双层动态 Skill 运行时与三位一体向量知识库平台。
 
-  <h1>Built with AI Studio</h2>
+## 仓库文档目录
 
-  <p>The fastest path from prompt to production with Gemini.</p>
-
-  <a href="https://aistudio.google.com/apps">Start building</a>
-
-</div>
+- [实施计划与 UI 原型设计规范 (`docs/implementation_plan.md`)](./docs/implementation_plan.md)
+- [可行性审查与 7 大开源项目对标架构报告 (`docs/feasibility_report.md`)](./docs/feasibility_report.md)

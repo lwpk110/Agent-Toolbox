@@ -1,0 +1,6 @@
+{
+  "name": "Agent-Toolbox — 跨平台统一 MCP 网关与动态技能控制台",
+  "description": "面向 Antigravity、Claude Code、Codex 与 OpenCode 的本地优先统一 MCP 网关、双层动态 Skill 热插拔、向量知识库 RAG 与 GitHub 跨平台同步控制中心。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
