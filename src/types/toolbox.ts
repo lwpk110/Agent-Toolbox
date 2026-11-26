@@ -194,6 +194,42 @@ export interface VectorHealthStats {
   lastRebuiltAt: string;
 }
 
+export interface DocUpdatePoint {
+  date: string;
+  created: number;
+  updated: number;
+  chunksDelta: number;
+}
+
+export interface VectorDimensionBucket {
+  dimension: string;
+  dimValue: number;
+  model: string;
+  spaceLabel: string;
+  docs: number;
+  chunks: number;
+  sharePct: number;
+}
+
+export interface CacheHitPoint {
+  date: string;
+  hitRate: number;
+  semanticHitRate: number;
+  exactHitRate: number;
+  queries: number;
+  avgLatencyMs: number;
+}
+
+export interface KnowledgeAnalytics {
+  updateFrequency: DocUpdatePoint[];
+  dimensionDistribution: VectorDimensionBucket[];
+  cacheHitTrend: CacheHitPoint[];
+  currentCacheHitRate: number;
+  cacheHitDelta: number;
+  totalPeriodUpdates: number;
+  totalVectors: number;
+}
+
 export interface VaultEntry {
   key: string;
   serviceName: string;
@@ -300,6 +336,7 @@ export interface GatewayStateSnapshot {
   docs: KnowledgeDoc[];
   memories: SharedMemory[];
   vectorHealth: VectorHealthStats;
+  knowledgeAnalytics: KnowledgeAnalytics;
   vault: VaultEntry[];
   sync: SyncStatus;
   preflight: SyncPreflightResult;

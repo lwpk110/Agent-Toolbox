@@ -9,6 +9,7 @@ import { api } from '../lib/api';
 import { ProtoIcon } from './ProtoIcon';
 import { ProtoSeg, ProtoStatus, ProtoTip } from './ProtoPrimitives';
 import { ModalDialog } from './ModalDialog';
+import { KnowledgeAnalyticsPanel } from './KnowledgeAnalyticsPanel';
 
 const QUICK_QUERIES = [
   '如何处理网关握手超时与连接池重连',
@@ -37,6 +38,7 @@ interface KnowledgeViewProps {
   ) => Promise<void>;
   onDeleteMemory: (id: string) => Promise<void>;
   onRebuildIndex: () => Promise<void>;
+  onRefreshState?: () => Promise<void>;
 }
 
 export function KnowledgeView({
@@ -51,6 +53,7 @@ export function KnowledgeView({
   onUpdateMemory,
   onDeleteMemory,
   onRebuildIndex,
+  onRefreshState,
 }: KnowledgeViewProps) {
   const [query, setQuery] = useState('如何处理网关握手超时与连接池重连');
   const [searched, setSearched] = useState(true);
@@ -103,7 +106,7 @@ export function KnowledgeView({
     return Array.from(set);
   }, [state.memories]);
 
-  const runSearch = async (q: string) => {
+  const runSearch = async (q: string, syncAnalytics = false) => {
     setSearched(true);
     if (!q.trim()) {
       setSearchResult({ query: '', latencyMs: 0, docs: [], memories: [], routing: [] });
@@ -113,6 +116,9 @@ export function KnowledgeView({
     try {
       const res = await api.searchKnowledge(q);
       setSearchResult(res);
+      if (syncAnalytics && onRefreshState) {
+        onRefreshState().catch(() => {});
+      }
     } finally {
       setSearching(false);
     }
@@ -268,6 +274,14 @@ export function KnowledgeView({
         </div>
       </div>
 
+      {/* Recharts Analytics Panel: Update Frequency, Vector Dimensions & Cache Hit Trend */}
+      {state.knowledgeAnalytics && (
+        <KnowledgeAnalyticsPanel
+          analytics={state.knowledgeAnalytics}
+          onOpenTip={setInfoTip}
+        />
+      )}
+
       {/* Main 2-column grid */}
       <div className="grid-main">
         {/* Trinity Search */}
@@ -292,7 +306,7 @@ export function KnowledgeView({
                 className="search"
                 onSubmit={(e) => {
                   e.preventDefault();
-                  runSearch(query);
+                  runSearch(query, true);
                 }}
               >
                 <label className="sr-only" htmlFor="kbQ">
@@ -320,7 +334,7 @@ export function KnowledgeView({
                     className="chip-btn"
                     onClick={() => {
                       setQuery(q);
-                      runSearch(q);
+                      runSearch(q, true);
                     }}
                   >
                     {q}

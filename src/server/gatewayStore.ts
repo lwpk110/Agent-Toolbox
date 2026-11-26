@@ -2,6 +2,8 @@ import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import type {
   AuditRpcEvent,
+  CacheHitPoint,
+  DocUpdatePoint,
   DualLayerSkill,
   ExposureMode,
   GatewayStateSnapshot,
@@ -9,6 +11,7 @@ import type {
   HitlApproval,
   HostProfile,
   HostScope,
+  KnowledgeAnalytics,
   KnowledgeChunk,
   KnowledgeDoc,
   McpServer,
@@ -27,6 +30,7 @@ import type {
   TransportProtocol,
   TrinitySearchResult,
   VaultEntry,
+  VectorDimensionBucket,
   VectorHealthStats,
 } from '../types/toolbox';
 
@@ -1156,6 +1160,66 @@ export class GatewayStore {
     lastRebuiltAt: new Date(Date.now() - 1800_000).toISOString(),
   };
 
+  private queryCache = new Map<string, number>();
+
+  private docUpdateSeries: DocUpdatePoint[] = (() => {
+    const base = [
+      { created: 1, updated: 2, chunksDelta: 6 },
+      { created: 0, updated: 3, chunksDelta: 5 },
+      { created: 2, updated: 1, chunksDelta: 9 },
+      { created: 1, updated: 4, chunksDelta: 11 },
+      { created: 0, updated: 2, chunksDelta: 4 },
+      { created: 3, updated: 2, chunksDelta: 14 },
+      { created: 1, updated: 3, chunksDelta: 8 },
+      { created: 2, updated: 4, chunksDelta: 13 },
+      { created: 1, updated: 2, chunksDelta: 7 },
+      { created: 0, updated: 5, chunksDelta: 10 },
+      { created: 3, updated: 3, chunksDelta: 16 },
+      { created: 2, updated: 4, chunksDelta: 12 },
+      { created: 1, updated: 5, chunksDelta: 11 },
+      { created: 2, updated: 3, chunksDelta: 9 },
+    ];
+    const now = Date.now();
+    return base.map((item, idx) => {
+      const offsetDays = base.length - 1 - idx;
+      const d = new Date(now - offsetDays * 86400_000);
+      const label =
+        offsetDays === 0
+          ? '今日'
+          : `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+      return { date: label, ...item };
+    });
+  })();
+
+  private cacheHitSeries: CacheHitPoint[] = (() => {
+    const base = [
+      { hitRate: 71.4, semanticHitRate: 44.2, exactHitRate: 27.2, queries: 128, avgLatencyMs: 16.4 },
+      { hitRate: 73.8, semanticHitRate: 45.6, exactHitRate: 28.2, queries: 142, avgLatencyMs: 15.8 },
+      { hitRate: 75.2, semanticHitRate: 46.8, exactHitRate: 28.4, queries: 164, avgLatencyMs: 15.1 },
+      { hitRate: 74.6, semanticHitRate: 46.1, exactHitRate: 28.5, queries: 151, avgLatencyMs: 15.3 },
+      { hitRate: 78.9, semanticHitRate: 49.4, exactHitRate: 29.5, queries: 186, avgLatencyMs: 14.0 },
+      { hitRate: 81.2, semanticHitRate: 51.0, exactHitRate: 30.2, queries: 204, avgLatencyMs: 13.4 },
+      { hitRate: 80.5, semanticHitRate: 50.3, exactHitRate: 30.2, queries: 192, avgLatencyMs: 13.6 },
+      { hitRate: 83.4, semanticHitRate: 52.8, exactHitRate: 30.6, queries: 218, avgLatencyMs: 12.7 },
+      { hitRate: 85.1, semanticHitRate: 54.0, exactHitRate: 31.1, queries: 236, avgLatencyMs: 12.1 },
+      { hitRate: 84.3, semanticHitRate: 53.5, exactHitRate: 30.8, queries: 229, avgLatencyMs: 12.3 },
+      { hitRate: 87.2, semanticHitRate: 55.6, exactHitRate: 31.6, queries: 254, avgLatencyMs: 11.4 },
+      { hitRate: 88.6, semanticHitRate: 56.4, exactHitRate: 32.2, queries: 271, avgLatencyMs: 10.8 },
+      { hitRate: 89.4, semanticHitRate: 57.1, exactHitRate: 32.3, queries: 284, avgLatencyMs: 10.4 },
+      { hitRate: 91.2, semanticHitRate: 58.3, exactHitRate: 32.9, queries: 298, avgLatencyMs: 9.8 },
+    ];
+    const now = Date.now();
+    return base.map((item, idx) => {
+      const offsetDays = base.length - 1 - idx;
+      const d = new Date(now - offsetDays * 86400_000);
+      const label =
+        offsetDays === 0
+          ? '今日'
+          : `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}`;
+      return { date: label, ...item };
+    });
+  })();
+
   private vaultEntries: VaultEntry[] = [
     {
       key: 'GITHUB_PERSONAL_TOKEN',
@@ -1381,6 +1445,75 @@ export class GatewayStore {
     });
   }
 
+  public getKnowledgeAnalytics(): KnowledgeAnalytics {
+    const primaryDocChunks = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
+    const longFormChunks = this.docs.reduce(
+      (sum, d) => sum + d.chunks.filter((c) => c.tokens >= 140 || d.sourceType === 'workspace').length,
+      0
+    );
+    const skillIndexVectors = this.skills.reduce(
+      (sum, s) => sum + Math.max(2, s.files.filter((f) => f.injectToModel).length),
+      0
+    );
+    const memoryVectors = this.memories.length * 3;
+
+    const rawBuckets: Array<Omit<VectorDimensionBucket, 'sharePct'>> = [
+      {
+        dimension: '1536 维',
+        dimValue: 1536,
+        model: 'text-embedding-3-small',
+        spaceLabel: 'RAG 主索引切片',
+        docs: this.docs.length,
+        chunks: primaryDocChunks + 36,
+      },
+      {
+        dimension: '1024 维',
+        dimValue: 1024,
+        model: 'bge-m3 (多语语义)',
+        spaceLabel: 'Skill 智能路由索引',
+        docs: this.skills.length,
+        chunks: skillIndexVectors + 14,
+      },
+      {
+        dimension: '768 维',
+        dimValue: 768,
+        model: 'bge-base-zh-v1.5',
+        spaceLabel: '跨宿主共享 Memory',
+        docs: this.memories.length,
+        chunks: memoryVectors + 12,
+      },
+      {
+        dimension: '3072 维',
+        dimValue: 3072,
+        model: 'text-embedding-3-large',
+        spaceLabel: '架构长文高精度段',
+        docs: Math.max(1, this.docs.filter((d) => d.sourceType === 'workspace' || d.chunkCount >= 2).length),
+        chunks: longFormChunks + 10,
+      },
+    ];
+
+    const totalVectors = rawBuckets.reduce((sum, b) => sum + b.chunks, 0);
+    const dimensionDistribution: VectorDimensionBucket[] = rawBuckets.map((b) => ({
+      ...b,
+      sharePct: totalVectors > 0 ? Number(((b.chunks / totalVectors) * 100).toFixed(1)) : 0,
+    }));
+
+    const latestCache = this.cacheHitSeries[this.cacheHitSeries.length - 1];
+    const prevCache = this.cacheHitSeries[this.cacheHitSeries.length - 2] || latestCache;
+    const cacheHitDelta = Number((latestCache.hitRate - prevCache.hitRate).toFixed(1));
+    const totalPeriodUpdates = this.docUpdateSeries.reduce((sum, p) => sum + p.created + p.updated, 0);
+
+    return {
+      updateFrequency: this.docUpdateSeries.map((p) => ({ ...p })),
+      dimensionDistribution,
+      cacheHitTrend: this.cacheHitSeries.map((p) => ({ ...p })),
+      currentCacheHitRate: latestCache.hitRate,
+      cacheHitDelta,
+      totalPeriodUpdates,
+      totalVectors,
+    };
+  }
+
   public getSnapshot(): GatewayStateSnapshot {
     return {
       metrics: this.getMetrics(),
@@ -1395,6 +1528,7 @@ export class GatewayStore {
         ...this.vectorHealth,
         totalChunks: this.docs.reduce((sum, d) => sum + d.chunkCount, 0),
       },
+      knowledgeAnalytics: this.getKnowledgeAnalytics(),
       vault: this.getVaultEntriesWithRefs(),
       sync: this.sync,
       preflight: this.getPreflight(),
@@ -2208,6 +2342,27 @@ export class GatewayStore {
       }));
 
     const elapsed = Math.max(8, Date.now() - started + 9);
+    if (q) {
+      const prevHits = this.queryCache.get(normalized) || 0;
+      const isExactHit = prevHits > 0;
+      const isSemanticHit = !isExactHit && (docHits.length > 0 || memHits.length > 0);
+      this.queryCache.set(normalized, prevHits + 1);
+
+      const latest = this.cacheHitSeries[this.cacheHitSeries.length - 1];
+      if (latest) {
+        const prevTotal = latest.queries;
+        const nextTotal = prevTotal + 1;
+        const exactCount = (latest.exactHitRate / 100) * prevTotal + (isExactHit ? 1 : 0);
+        const semanticCount = (latest.semanticHitRate / 100) * prevTotal + (isSemanticHit ? 1 : 0);
+        latest.queries = nextTotal;
+        latest.exactHitRate = Number(Math.min(99, (exactCount / nextTotal) * 100).toFixed(1));
+        latest.semanticHitRate = Number(Math.min(99, (semanticCount / nextTotal) * 100).toFixed(1));
+        latest.hitRate = Number(Math.min(99.2, latest.exactHitRate + latest.semanticHitRate).toFixed(1));
+        latest.avgLatencyMs = Number(
+          Math.max(4.5, (latest.avgLatencyMs * prevTotal + (isExactHit ? 4.2 : elapsed)) / nextTotal).toFixed(1)
+        );
+      }
+    }
     return {
       query: q,
       latencyMs: elapsed,
@@ -2238,11 +2393,21 @@ export class GatewayStore {
       sourceType,
       indexedAt: new Date().toISOString(),
     };
+    const todayPoint = this.docUpdateSeries[this.docUpdateSeries.length - 1];
     if (existing) {
+      const prevChunks = existing.chunkCount;
       const idx = this.docs.findIndex((d) => d.id === existing.id);
       this.docs[idx] = doc;
+      if (todayPoint) {
+        todayPoint.updated += 1;
+        todayPoint.chunksDelta += Math.max(1, chunks.length - prevChunks);
+      }
     } else {
       this.docs.unshift(doc);
+      if (todayPoint) {
+        todayPoint.created += 1;
+        todayPoint.chunksDelta += chunks.length;
+      }
     }
     this.vectorHealth.totalChunks = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
     this.vectorHealth.lastRebuiltAt = new Date().toISOString();
@@ -2254,12 +2419,18 @@ export class GatewayStore {
   public updateKnowledgeDoc(id: string, content: string): KnowledgeDoc | null {
     const doc = this.docs.find((d) => d.id === id);
     if (!doc) return null;
+    const prevChunks = doc.chunkCount;
     const chunks = chunkMarkdownDocument(doc.id, content);
     doc.content = content.trim();
     doc.chunks = chunks;
     doc.chunkCount = chunks.length;
     doc.contentPreview = (chunks[0]?.content || content.trim()).slice(0, 220);
     doc.indexedAt = new Date().toISOString();
+    const todayPoint = this.docUpdateSeries[this.docUpdateSeries.length - 1];
+    if (todayPoint) {
+      todayPoint.updated += 1;
+      todayPoint.chunksDelta += Math.max(1, Math.abs(chunks.length - prevChunks));
+    }
     this.vectorHealth.totalChunks = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
     this.markDirty();
     this.emitEvent('kb.doc_updated', { id });
@@ -2270,6 +2441,10 @@ export class GatewayStore {
     const prev = this.docs.length;
     this.docs = this.docs.filter((d) => d.id !== id);
     if (this.docs.length !== prev) {
+      const todayPoint = this.docUpdateSeries[this.docUpdateSeries.length - 1];
+      if (todayPoint) {
+        todayPoint.updated += 1;
+      }
       this.vectorHealth.totalChunks = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
       this.markDirty();
       this.emitEvent('kb.doc_deleted', { id });
@@ -2325,6 +2500,16 @@ export class GatewayStore {
 
   public rebuildVectorIndex(): VectorHealthStats {
     const total = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
+    const todayPoint = this.docUpdateSeries[this.docUpdateSeries.length - 1];
+    if (todayPoint) {
+      todayPoint.updated += 1;
+    }
+    const latestCache = this.cacheHitSeries[this.cacheHitSeries.length - 1];
+    if (latestCache) {
+      latestCache.semanticHitRate = Number(Math.min(64.0, latestCache.semanticHitRate + 0.8).toFixed(1));
+      latestCache.hitRate = Number(Math.min(96.8, latestCache.semanticHitRate + latestCache.exactHitRate).toFixed(1));
+      latestCache.avgLatencyMs = Number(Math.max(7.2, latestCache.avgLatencyMs - 0.5).toFixed(1));
+    }
     this.vectorHealth = {
       ...this.vectorHealth,
       totalChunks: total,

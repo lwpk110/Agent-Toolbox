@@ -346,6 +346,39 @@ dialog.dlg::backdrop { background: rgba(31,35,40,0.5); }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 .toast .od-icon { --od-icon-size: 16px; color: #4ac26b; }
 
+/* ---------- knowledge analytics (Recharts) ---------- */
+.kb-kpi-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-bottom: 1px solid var(--line-row); background: var(--bg); }
+.kb-kpi-item { padding: var(--s4) var(--s5); border-right: 1px solid var(--line-row); display: grid; gap: 2px; }
+.kb-kpi-item:last-child { border-right: 0; }
+.kb-kpi-lbl { font-size: var(--fs-12); color: var(--ink-2); }
+.kb-kpi-val { font-size: var(--fs-20); font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.25; color: var(--ink); display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.kb-kpi-meta { font-size: var(--fs-12); color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.kb-kpi-delta { font-size: var(--fs-12); font-weight: 500; font-family: var(--mono); }
+.kb-kpi-delta.up { color: var(--ok); }
+.kb-kpi-delta.down { color: var(--bad); }
+
+.kb-chart-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.kb-chart-pane { padding: var(--s5); border-right: 1px solid var(--line-row); display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.kb-chart-pane:last-child { border-right: 0; }
+.kb-chart-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s2); flex-wrap: wrap; }
+.kb-chart-head h3 { font-size: var(--fs-14); font-weight: 600; color: var(--ink); }
+.kb-chart-sub { font-size: var(--fs-12); color: var(--ink-2); }
+.kb-chart-legend { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; font-size: var(--fs-12); color: var(--ink-2); }
+.kb-legend-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.kb-legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.kb-legend-line { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+.kb-chart-canvas { width: 100%; height: 224px; min-width: 0; }
+.kb-chart-canvas.tall { height: 296px; }
+.kb-tooltip { background: var(--bg); border: 1px solid var(--line); border-radius: var(--r); padding: 8px 12px; box-shadow: 0 4px 12px rgba(31,35,40,0.08); font-size: var(--fs-12); color: var(--ink); min-width: 156px; }
+.kb-tooltip-title { font-weight: 600; margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid var(--line-row); font-family: var(--mono); }
+.kb-tooltip-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 2px 0; }
+.kb-tooltip-key { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); }
+.kb-tooltip-val { font-family: var(--mono); font-weight: 600; color: var(--ink); }
+.kb-dim-list { display: grid; gap: 6px; padding-top: var(--s2); border-top: 1px solid var(--line-row); }
+.kb-dim-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); font-size: var(--fs-12); }
+.kb-dim-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.kb-dim-right { font-family: var(--mono); color: var(--ink-2); white-space: nowrap; }
+
 /* ---------- responsive ---------- */
 @media (max-width: 1280px) {
   .nav button .od-icon { display: none; }
@@ -360,6 +393,12 @@ dialog.dlg::backdrop { background: rgba(31,35,40,0.5); }
 @media (max-width: 1180px) {
   .stats { --od-cols: 2; }
   .grid-2, .grid-main { grid-template-columns: minmax(0,1fr); }
+  .kb-chart-grid { grid-template-columns: minmax(0, 1fr); }
+  .kb-chart-pane { border-right: 0; border-bottom: 1px solid var(--line-row); }
+  .kb-chart-pane:last-child { border-bottom: 0; }
+  .kb-kpi-strip { grid-template-columns: minmax(0, 1fr); }
+  .kb-kpi-item { border-right: 0; border-bottom: 1px solid var(--line-row); }
+  .kb-kpi-item:last-child { border-bottom: 0; }
   .pipe { grid-template-columns: repeat(2, minmax(0,1fr)); }
   .pipe > div, .pipe > div:nth-child(n+4) { border-bottom: 1px solid var(--line-row); border-right: 1px solid var(--line-row); }
   .pipe > div:nth-child(2n), .pipe > div:last-child { border-right: 0; }

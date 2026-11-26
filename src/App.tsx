@@ -61,6 +61,7 @@ export default function App() {
         case 'kb':
           return [
             ['k-health', '健康状况'],
+            ['k-analytics', '索引与缓存分析'],
             ['k-search', '统一检索'],
             ['k-pool', '知识库与 Memory'],
           ];
@@ -128,6 +129,10 @@ export default function App() {
       'kb.doc_added',
       'kb.doc_updated',
       'kb.doc_deleted',
+      'kb.memory_added',
+      'kb.memory_updated',
+      'kb.memory_deleted',
+      'kb.rebuilt',
       'hitl.pending',
       'hitl.resolved',
       'vault.updated',
@@ -662,6 +667,10 @@ export default function App() {
               onUpdateMemory={handleUpdateMemory}
               onDeleteMemory={handleDeleteMemory}
               onRebuildIndex={handleRebuildIndex}
+              onRefreshState={async () => {
+                const fresh = await api.getState();
+                setState(fresh);
+              }}
             />
           ) : view === 'sync' ? (
             <SyncVaultView
