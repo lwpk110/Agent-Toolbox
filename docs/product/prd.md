@@ -1,8 +1,10 @@
 # Agent-Toolbox 产品需求文档（PRD）
 
-- **文档版本**：`v1.0.0`（工程落地基线，与 `protype/index.html` 及 `docs/implementation_plan.md` 100% 对齐）
+- **文档版本**：`v1.0.0`（目标需求与验收基线）
 - **目标平台**：本地常驻守护网关（Node.js / TypeScript）+ Web 管理控制台（Desktop 1440px 基准，完整适配 360px–1920px 响应式断点）
-- **支持宿主**：`Antigravity`、`Claude Code`、`Codex CLI`、`OpenCode`
+- **目标宿主**：`Antigravity`、`Claude Code`、`Codex CLI`、`OpenCode`
+
+实现进度见[当前实现](../guides/current-implementation.md)。界面参考见[实施计划](./implementation_plan.md)和[交互原型](../../prototype/index.html)。
 
 ---
 

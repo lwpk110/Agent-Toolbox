@@ -2,6 +2,8 @@
 
 Agent-Toolbox 是一套面向多 AI Agent 协同开发者（全面适配 **Antigravity**、**Claude Code**、**Codex CLI**、**OpenCode**）的本地优先（Local-First）统一工具网关、动态技能（Skill）运行时与向量知识库控制中心。融合了 **`btsouth/toolport`** 等 GitHub 7 大标杆开源项目的架构精髓，让所有宿主仅需挂载**唯一一个 MCP Server 入口**，即可实现 ~91% 上下文 Token 瘦身、SHA-256 防投毒隔离、双层 `SKILL.md` 动态热插拔、向量 RAG 检索及 GitHub 零泄漏同步。
 
+下文记录目标设计和实施阶段。可直接体验的功能见[当前实现](../guides/current-implementation.md)。
+
 ---
 
 ## 1. GitHub 七大开源项目对标融合矩阵

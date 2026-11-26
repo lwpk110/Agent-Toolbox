@@ -1,6 +1,6 @@
 # Agent-Toolbox 安全威胁模型与 GitOps 同步设计
 
-作为统领四大 AI Agent 宿主、外部 MCP 插件、本地密钥与私有知识库的**唯一控制平面**，Agent-Toolbox 遵循 **Fail-Closed（默认阻断）** 与 **Local-First Zero-Leakage（本地优先零泄漏）** 两大核心安全原则。
+Agent-Toolbox 的目标安全架构采用默认阻断和本地优先的设计原则。当前控制台可演练隔离、审批、Vault 和推送前检查，功能范围见[当前实现](../guides/current-implementation.md)。
 
 ---
 
@@ -127,7 +127,7 @@ flowchart TB
         F1["toolbox.manifest.json<br/>(拓扑、策略、vault:// 引用)"]
         F2["toolbox.lock.json<br/>(全量工具与 Skill SHA-256)"]
         F3["skills/*/SKILL.md<br/>(双层技能源码)"]
-        F4["docs/*.md + memories.jsonl<br/>(纯文本知识源与跨宿主记忆)"]
+        F4["docs/**/*.md + memories.jsonl<br/>(纯文本知识源与跨宿主记忆)"]
     end
 
     subgraph LocalB["开发机 B (新设备恢复端)"]

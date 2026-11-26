@@ -1,8 +1,11 @@
-export type DocCategory = '产品与规划' | '架构与决策' | '协议与安全';
+export const DOC_CATEGORIES = ['总览', '开发指南', '产品与规划', '系统架构', 'ADR', '协议与安全'] as const;
+
+export type DocCategory = (typeof DOC_CATEGORIES)[number];
 
 export interface DocMeta {
   slug: string;
   filename: string;
+  relativePath: string;
   title: string;
   shortTitle: string;
   category: DocCategory;

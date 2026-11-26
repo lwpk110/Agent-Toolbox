@@ -1,5 +1,7 @@
 # Agent-Toolbox 跨平台统一 MCP 网关、动态技能与向量知识库 — 可行性审查与架构设计报告
 
+本文记录方案调研与可行性判断。实际实现和宿主接入范围见[当前实现](../guides/current-implementation.md)。
+
 ## 一、 总体可行性评估结论
 - **综合可行性评级**：**A+（高度可行，具备极高工程与开源生态价值）**
 - **核心愿景验证**：通过在本地部署单一常驻守护网关 **`Agent-Toolbox (toolbox-gateway)`** 并对外暴露唯一标准 MCP Server 接口，**Antigravity、Claude Code、Codex CLI、OpenCode** 四大主流 AI 编码代理均无需任何宿主源码改造，仅需一行配置挂载该唯一入口，即可集中调用所有外部子 MCP 服务、运行时动态热加载/卸载双层 Skill 技能模块、检索本地向量知识库与跨宿主共享记忆，并通过 GitHub 声明式仓库实现跨设备无缝同步。

@@ -1,6 +1,6 @@
 # Agent-Toolbox API 与 MCP 协议规范
 
-本文档定义 **Agent-Toolbox** 的核心数据模型（ER 关系与 TypeScript/JSON Schema 契约）、唯一 MCP 入口 JSON-RPC 2.0 协议（含 5 大内置元工具与自定义错误码）以及 Web 管理控制台的 REST API 与 SSE 实时事件规范。
+本文档定义 **Agent-Toolbox** 的目标数据模型、MCP JSON-RPC 2.0 协议及控制台 REST / SSE 契约。当前端点及实现范围见[当前实现](../guides/current-implementation.md)。
 
 ---
 
@@ -196,7 +196,7 @@ sequenceDiagram
     participant Sub as Downstream MCP / Skill
 
     Client->>MCP: POST tools/list
-    MCP-->>Client: 返回 5 元工具 + Pinned 工具 (~1,870 Tokens, 省 89.7%)
+    MCP-->>Client: 返回内置元工具 + Pinned 工具
 
     Client->>MCP: POST tools/call (toolbox__discover_capabilities)
     MCP-->>Client: 返回候选 matches: [security-owasp-auditor, mcp-diagnostics-prober]

@@ -1093,7 +1093,7 @@ export class GatewayStore {
       },
       {
         id: 'doc-4',
-        filePath: 'docs/feasibility_report.md',
+        filePath: 'docs/product/feasibility_report.md',
         content:
           '# 可行性调研与开源对标\n\n## Lazy Discovery 上下文压缩\n借鉴 toolport、1mcp、MCPHub、MetaMCP 等 7 大开源项目，通过 Lazy Discovery 将单轮默认上下文 Token 从 18.2k 压缩至 1.6k 左右。\n\n## 三级渐进式 Skill 目录包\n遵循开放 Agent Skills 规范，仅在挂载时注入 SKILL.md，目录内脚本与参考文档通过 `toolbox__read_skill_file` 按需读取。',
         indexedAt: new Date(Date.now() - 14400_000).toISOString(),

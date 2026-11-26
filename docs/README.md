@@ -1,74 +1,37 @@
 # Agent-Toolbox 工程文档中心
 
-**Agent-Toolbox** 是面向多 AI Agent 协同开发者（全面适配 **Antigravity**、**Claude Code**、**Codex CLI**、**OpenCode**）的本地优先（Local-First）统一 MCP 网关、双层动态 Skill 运行时与三位一体向量知识库控制中心。
+六个模块的实现范围、运行数据和 API 入口见[当前实现](./guides/current-implementation.md)。
 
-本目录提供从产品需求、系统架构、关键技术决策（ADR）、协议与数据模型契约到安全与 GitOps 同步设计的完整工程文档体系，并与 `protype/` 交互原型保持 100% 一致，是后续全栈编码与验收测试的单一事实来源（Single Source of Truth）。
+## 文档索引
 
----
+| 分类目录 | 归档内容 | 现有文档 |
+| --- | --- | --- |
+| `guides/` 开发指南 | 当前实现、开发流程和操作指南 | [当前实现](./guides/current-implementation.md) |
+| `product/` 产品与规划 | 需求、验收、调研和实施路线 | [产品需求](./product/prd.md)、[可行性报告](./product/feasibility_report.md)、[实施计划](./product/implementation_plan.md) |
+| `architecture/` 系统架构 | 系统设计、模块和数据流 | [系统架构](./architecture/architecture.md) |
+| `adr/` 架构决策记录 | 每项决策独立成文，按编号查阅 | [ADR 索引](./adr/README.md) |
+| `reference/` 协议与安全 | API 契约、协议规范、安全和同步设计 | [API 与 MCP 协议设计](./reference/api-mcp-spec.md)、[安全与 GitOps 设计](./reference/security-gitops.md) |
 
-## 1. 文档体系与阅读路线
+## 阅读顺序
 
-```mermaid
-flowchart LR
-    subgraph P1["01. 产品与可行性基线"]
-        R1["feasibility_report.md<br/>可行性审查与 7 仓对标"]
-        R2["prd.md<br/>PRD 产品需求与验收标准"]
-    end
+- **运行和开发** 先看当前实现，再阅读系统架构和 API 协议设计。
+- **产品和验收** 先读产品需求和实施计划，再对照[交互原型](../prototype/index.html)和[界面线框](../prototype/wireframes.html)。
+- **了解设计取舍** 从可行性报告进入架构决策，安全与状态持久化相关设计见安全与 GitOps 文档。
 
-    subgraph P2["02. 架构设计与决策记录"]
-        A1["architecture.md<br/>系统架构与数据流设计"]
-        A2["adr.md<br/>ADR 架构决策记录 001-006"]
-    end
+## 新增文档
 
-    subgraph P3["03. 工程契约与安全运维"]
-        S1["api-mcp-spec.md<br/>API / MCP 协议与数据模型"]
-        S2["security-gitops.md<br/>安全威胁模型与 GitOps 同步"]
-    end
+将 Markdown 放入上表对应的目录，可按专题继续建子目录。用一级标题写文档名称，正文第一段写简短概览。控制台每次打开「可行性报告」时会读取最新文件并分组。新文档的链接由相对于 `docs/` 的文件路径生成。
 
-    subgraph P4["04. 实施路线与交互原型"]
-        I1["implementation_plan.md<br/>分阶段实施计划与线框"]
-        I2["protype/index.html<br/>6 大核心界面交互原型"]
-    end
+在此索引补上主要阅读入口。知识库中的「收录工作区 docs/」会递归导入 Markdown，保留各文件的相对路径。
 
-    R1 --> R2
-    R2 --> A1
-    A1 --> A2
-    A1 --> S1
-    A1 --> S2
-    A2 --> S1
-    A2 --> S2
-    S1 --> I1
-    S2 --> I1
-    I1 --> I2
-```
+## 术语
 
----
-
-## 2. 文档索引清单
-
-| 分类 | 文档 | 核心内容 | 适用角色 |
-| :--- | :--- | :--- | :--- |
-| **产品与规划** | `docs/prd.md` | 6 大核心模块功能需求、宿主权限矩阵、页面状态表、量化指标与可测试验收标准（AC） | 产品经理、前后端研发、QA |
-| **产品与规划** | `docs/feasibility_report.md` | GitHub 7 大标杆开源项目融合矩阵、四大宿主协议兼容评级与 4 大核心工程瓶颈解法 | 技术负责人、架构师 |
-| **产品与规划** | `docs/implementation_plan.md` | 5 阶段分步落地路线、视觉设计规范与 6 大界面 ASCII 线框图 | 项目管理、全栈研发 |
-| **架构与决策** | `docs/architecture.md` | Hub-and-Spoke 拓扑、Daemon + `stdio-proxy` 进程模型、5 级中间件流水线、双层 Skill 运行时与三位一体向量引擎 | 架构师、后端研发 |
-| **架构与决策** | `docs/adr.md` | 6 篇核心工程决策记录（单守护进程、Lazy Discovery、双层 Skill、SHA-256 隔离、三位一体向量库、GitOps+Vault） | 架构师、核心贡献者 |
-| **协议与安全** | `docs/api-mcp-spec.md` | 核心实体 ER 图、TypeScript/JSON Schema、唯一入口 JSON-RPC 2.0 规范（5 元工具 + 错误码）与控制台 REST/SSE API | 前后端研发、协议开发 |
-| **协议与安全** | `docs/security-gitops.md` | STRIDE 威胁模型、Quarantine 状态机、HITL 审批时序、Output Redaction 规则、Local Vault 与 GitHub 零泄漏同步门禁 | 安全工程师、运维/研发 |
-
----
-
-## 3. 核心术语对齐表（Glossary）
-
-为保证文档、原型、代码与接口命名完全一致，项目内统一使用以下术语：
-
-| 术语 | 英文标识 | 定义 |
-| :--- | :--- | :--- |
-| **唯一 MCP 入口** | `Unified MCP Entry` | 四个 AI Agent 宿主挂载的唯一本地端点（`stdio://agent-toolbox` 或 `http://127.0.0.1:3000/api/mcp/sse`） |
-| **常驻暴露** | `Pinned` | 每轮对话均随 `tools/list` 下发的工具 Schema，零发现延迟但持续占用上下文 Token |
-| **按需懒加载** | `Lazy` | 默认不进入 `tools/list`，通过语义发现与动态挂载按需暴露，实现约 89%–91% Token 瘦身 |
-| **隔离审查区** | `Quarantine` | 当下游 MCP 工具 Schema 的 SHA-256 指纹与 `toolbox.lock.json` 不匹配时触发的自动拦截状态 |
-| **人工审批锁** | `HITL` | Human-in-the-Loop，高危写/删工具执行前的同步暂停与人工确认门禁 |
-| **双层 Skill** | `Dual-Layer Skill` | 同时包含第 1 层 `SKILL.md`（SOP 指令文本）与第 2 层关联可执行 MCP Tools 的动态热插拔能力包 |
-| **三位一体向量检索** | `Trinity Search` | 单次自然语言查询同时命中私有文档分块（RAG）、跨宿主共享记忆（Memory）与推荐 Skill/工具（Smart Routing） |
-| **本地密钥保险箱** | `Local Vault` | 仅在本地加密存储真实凭据，配置文件中统一使用 `vault://KEY_NAME` 符号引用以实现 GitHub 零泄漏同步 |
+| 术语 | 含义 |
+| --- | --- |
+| MCP 统一入口 | 向宿主集中暴露工具的网关入口。目标设计包括 stdio 代理和 HTTP 传输。 |
+| Pinned / Lazy | Pinned 工具随 `tools/list` 暴露，Lazy 工具按需发现和使用。 |
+| Quarantine | 工具 Schema 指纹异常时隔离下游服务的机制。 |
+| HITL | Human-in-the-Loop，在敏感操作前等待人工审批。 |
+| 双层 Skill | Skill 指令（`SKILL.md`）和关联的 MCP 工具。目录包可附带按需读取的资源。 |
+| 三位一体检索 | 同次查询返回文档、记忆和推荐 Skill。 |
+| Local Vault | 使用 `vault://KEY_NAME` 引用密钥，便于将配置与密钥值分开管理。 |

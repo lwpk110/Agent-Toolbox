@@ -2,6 +2,8 @@
 
 本文档定义 **Agent-Toolbox** 的总体分层架构、进程守护模型、核心子系统职责边界、5 级可插拔中间件管道、双层 Skill 动态运行时以及三位一体本地向量引擎的工程实现蓝图。
 
+控制台当前采用 Express 与内存网关。代码入口及已接通的接口见[当前实现](../guides/current-implementation.md)。
+
 ---
 
 ## 1. 总体系统架构（Hub-and-Spoke 多路复用）
@@ -188,7 +190,7 @@ sequenceDiagram
 flowchart TB
     Q["自然语言查询<br/>Web UI 统一检索 / toolbox__search_knowledge"] --> EMB["查询向量化 + 中文/代码分词<br/>1536d Embedding + Lexical Tokens"]
 
-    EMB --> C1["集合 1: knowledge_chunks<br/>私有工程文档分段 (docs/*.md)<br/>保留文件路径与段落溯源"]
+    EMB --> C1["集合 1: knowledge_chunks<br/>私有工程文档分段 (docs/**/*.md)<br/>保留文件路径与段落溯源"]
     EMB --> C2["集合 2: shared_memories<br/>跨宿主持久化共享记忆<br/>保留写入宿主 + 主题标签"]
     EMB --> C3["集合 3: capability_index<br/>Lazy MCP 工具 + Standby Skill 描述<br/>支持语义路由唤醒"]
 

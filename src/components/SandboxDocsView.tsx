@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { GatewayStateSnapshot } from '../types/toolbox';
-import type { DocDetail, DocMeta } from '../types/docs';
+import { DOC_CATEGORIES, type DocDetail, type DocMeta } from '../types/docs';
 import { api } from '../lib/api';
 import { ProtoIcon } from './ProtoIcon';
 import { ProtoMore, ProtoSeg, ProtoStatus } from './ProtoPrimitives';
@@ -115,21 +115,27 @@ export function SandboxDocsView({
       ),
     [state.servers]
   );
+  const docGroups = DOC_CATEGORIES.map((category) => ({
+    category,
+    docs: docList.filter((doc) => doc.category === category).sort(
+      (a, b) => Number(b.filename === 'README.md') - Number(a.filename === 'README.md')
+    ),
+  })).filter((group) => group.docs.length > 0);
 
   useEffect(() => {
     if (tab !== 'report') return;
-    if (docList.length === 0) {
-      api.getDocsList().then(setDocList).catch(() => {});
-    }
-  }, [tab, docList.length]);
+    api.getDocsList().then(setDocList).catch(() => {});
+  }, [tab]);
 
   useEffect(() => {
     if (tab !== 'report' || activeDocSlug === 'summary') return;
+    let current = true;
     setDocLoading(true);
-    api
-      .getDocDetail(activeDocSlug)
-      .then(setDocDetail)
-      .finally(() => setDocLoading(false));
+    api.getDocDetail(activeDocSlug)
+      .then((doc) => { if (current) setDocDetail(doc); })
+      .catch(() => { if (current) setDocDetail(null); })
+      .finally(() => { if (current) setDocLoading(false); });
+    return () => { current = false; };
   }, [tab, activeDocSlug]);
 
   const handleSelectCustomMethod = (nextMethod: string) => {
@@ -194,9 +200,9 @@ export function SandboxDocsView({
   const handleExportMd = async () => {
     try {
       const target =
-        activeDocSlug !== 'summary' && docDetail
-          ? docDetail
-          : await api.getDocDetail('feasibility');
+        activeDocSlug === 'summary'
+          ? await api.getDocDetail('feasibility')
+          : docDetail?.slug === activeDocSlug ? docDetail : await api.getDocDetail(activeDocSlug);
       const blob = new Blob([target.content], { type: 'text/markdown;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -522,7 +528,7 @@ export function SandboxDocsView({
               </button>
             )}
 
-            {docList.length > 0 && (
+            {docGroups.length > 0 && (
               <div
                 className="side-sec"
                 style={{
@@ -531,17 +537,21 @@ export function SandboxDocsView({
                   borderTop: '1px solid var(--line-row)',
                 }}
               >
-                <div className="side-h">完整工程文档与架构图</div>
-                {docList.map((d) => (
-                  <button
-                    key={d.slug}
-                    type="button"
-                    className="side-link"
-                    aria-current={activeDocSlug === d.slug ? 'true' : undefined}
-                    onClick={() => setActiveDocSlug(d.slug)}
-                  >
-                    <span className="od-truncate">{d.shortTitle}</span>
-                  </button>
+                {docGroups.map(({ category, docs }) => (
+                  <div className="side-sec" key={category}>
+                    <div className="side-h">{category}</div>
+                    {docs.map((doc) => (
+                      <button
+                        key={doc.slug}
+                        type="button"
+                        className="side-link"
+                        aria-current={activeDocSlug === doc.slug ? 'true' : undefined}
+                        onClick={() => setActiveDocSlug(doc.slug)}
+                      >
+                        <span className="od-truncate">{doc.shortTitle}</span>
+                      </button>
+                    ))}
+                  </div>
                 ))}
               </div>
             )}
@@ -605,13 +615,16 @@ export function SandboxDocsView({
                     <span className="muted">正在加载文档与 Mermaid 架构图…</span>
                   </div>
                 </div>
-              ) : docDetail ? (
+              ) : docDetail?.slug === activeDocSlug ? (
                 <MarkdownViewer
                   markdown={docDetail.content}
+                  relativePath={docDetail.relativePath}
                   theme="light"
+                  docs={docList}
+                  onOpenDoc={setActiveDocSlug}
                   onExpandDiagram={setLightboxDiagram}
                 />
-              ) : null}
+              ) : <p className="muted">无法读取这篇文档。</p>}
             </article>
           )}
         </div>

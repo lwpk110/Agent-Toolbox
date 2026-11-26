@@ -655,8 +655,7 @@ export function KnowledgeView({
           <div className="drop-zone">
             <b>一键收录本项目工作区 docs/ 目录</b>
             <p className="small muted">
-              将自动读取服务端受控目录 <span className="mono">docs/*.md</span>
-              （含 PRD、架构设计、ADR、安全与 GitOps 规范等），按标题切分为 RAG 向量段并立即可检。
+              从工作区 <span className="mono">docs/</span> 及其子目录读取 Markdown，按标题切分，导入后即可检索。
             </p>
           </div>
         ) : (

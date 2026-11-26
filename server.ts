@@ -1,7 +1,12 @@
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
-import type { DocCategory, DocMeta } from './src/types/docs';
+import {
+  countWorkspaceDocs,
+  findWorkspaceDoc,
+  listWorkspaceDocs,
+  walkWorkspaceDocs,
+} from './src/server/workspaceDocs';
 import type {
   ExposureMode,
   HostScope,
@@ -17,122 +22,19 @@ import {
   parseSkillFrontmatter,
 } from './src/server/gatewayStore';
 
+if (process.argv.includes('--production')) {
+  process.env.NODE_ENV = 'production';
+}
+
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = process.cwd();
 const DOCS_DIR = path.resolve(ROOT_DIR, 'docs');
 const SKILLS_DIR = path.resolve(ROOT_DIR, 'skills');
-const PROTYPE_DIR = path.resolve(ROOT_DIR, 'protype');
+const PROTOTYPE_DIR = path.resolve(ROOT_DIR, 'prototype');
 const DIST_DIR = path.resolve(ROOT_DIR, 'dist');
 
 app.use(express.json({ limit: '4mb' }));
-
-interface RegistryEntry {
-  slug: string;
-  filename: string;
-  title: string;
-  shortTitle: string;
-  category: DocCategory;
-  summary: string;
-}
-
-const DOC_REGISTRY: RegistryEntry[] = [
-  {
-    slug: 'overview',
-    filename: 'README.md',
-    title: '工程文档中心总览',
-    shortTitle: '文档体系总览',
-    category: '产品与规划',
-    summary: '文档依赖关系图、阅读路线与统一术语对齐表。',
-  },
-  {
-    slug: 'prd',
-    filename: 'prd.md',
-    title: 'PRD 产品需求文档',
-    shortTitle: 'PRD 产品需求',
-    category: '产品与规划',
-    summary: '6 大模块逐项需求、宿主权限矩阵、KPI 目标与可测试验收标准。',
-  },
-  {
-    slug: 'feasibility',
-    filename: 'feasibility_report.md',
-    title: '可行性审查与 7 仓对标报告',
-    shortTitle: '可行性审查报告',
-    category: '产品与规划',
-    summary: '7 大 GitHub 开源项目融合矩阵、四大宿主兼容评级与工程瓶颈解法。',
-  },
-  {
-    slug: 'plan',
-    filename: 'implementation_plan.md',
-    title: '分阶段实施计划与界面线框',
-    shortTitle: '分阶段实施计划',
-    category: '产品与规划',
-    summary: '视觉 Token 规范、6 大界面 ASCII 线框图与 5 阶段落地路线。',
-  },
-  {
-    slug: 'architecture',
-    filename: 'architecture.md',
-    title: '系统架构设计文档',
-    shortTitle: '系统架构设计',
-    category: '架构与决策',
-    summary: 'Hub-and-Spoke 拓扑、单守护进程模型、5 级中间件管道、双层 Skill 与三位一体向量引擎。',
-  },
-  {
-    slug: 'adr',
-    filename: 'adr.md',
-    title: 'ADR 架构决策记录集 (001–006)',
-    shortTitle: 'ADR 决策记录集',
-    category: '架构与决策',
-    summary: '6 项关键工程技术选型的背景痛点、备选方案对比与长期后果。',
-  },
-  {
-    slug: 'api-mcp-spec',
-    filename: 'api-mcp-spec.md',
-    title: 'API 与 MCP 协议规范',
-    shortTitle: 'API & MCP 协议',
-    category: '协议与安全',
-    summary: '全系统 ER 数据模型、TypeScript 契约、5 元工具 JSON-RPC 规范、错误码与 REST/SSE API。',
-  },
-  {
-    slug: 'security-gitops',
-    filename: 'security-gitops.md',
-    title: '安全威胁模型与 GitOps 同步设计',
-    shortTitle: '安全与 GitOps 设计',
-    category: '协议与安全',
-    summary: 'STRIDE 威胁分析、Quarantine 状态机、HITL 审批、Output Redaction、Vault 与零泄漏同步门禁。',
-  },
-];
-
-const REGISTRY_BY_SLUG = new Map<string, RegistryEntry>(DOC_REGISTRY.map((entry) => [entry.slug, entry]));
-
-function readDocEntry(slug: string): { meta: DocMeta; content: string } | null {
-  const entry = REGISTRY_BY_SLUG.get(slug);
-  if (!entry) return null;
-
-  const fullPath = path.resolve(DOCS_DIR, entry.filename);
-  if (!fullPath.startsWith(DOCS_DIR + path.sep)) {
-    return null;
-  }
-
-  const content = fs.existsSync(fullPath)
-    ? fs.readFileSync(fullPath, 'utf-8')
-    : `# Missing document\n\n\`docs/${entry.filename}\` was not found.`;
-
-  const diagramMatches = content.match(/^```mermaid\b/gm);
-  const diagramCount = diagramMatches ? diagramMatches.length : 0;
-  const wordCount = content.replace(/\s+/g, '').length;
-  const readMinutes = Math.max(1, Math.ceil(wordCount / 550));
-
-  return {
-    meta: {
-      ...entry,
-      diagramCount,
-      wordCount,
-      readMinutes,
-    },
-    content,
-  };
-}
 
 function sendOk(res: express.Response, data: unknown, extra?: Record<string, unknown>) {
   res.json({
@@ -294,7 +196,7 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     mode: 'agent-toolbox-gateway',
     metrics,
-    docsCount: DOC_REGISTRY.length,
+    docsCount: countWorkspaceDocs(DOCS_DIR),
   });
 });
 
@@ -728,25 +630,15 @@ app.post('/api/v1/kb/import-workspace-docs', (_req, res) => {
     return;
   }
   const realDocsRoot = fs.realpathSync(DOCS_DIR);
-  const entries = fs.readdirSync(realDocsRoot, { withFileTypes: true });
   const importedFiles: string[] = [];
 
-  for (const entry of entries) {
-    if (importedFiles.length >= 20) break;
-    if (entry.name.startsWith('.') || !entry.name.toLowerCase().endsWith('.md')) continue;
-    const candidate = path.join(realDocsRoot, entry.name);
-    let realFile: string;
-    try {
-      realFile = fs.realpathSync(candidate);
-    } catch {
-      continue;
-    }
-    if (!realFile.startsWith(realDocsRoot + path.sep)) continue;
-    const stat = fs.statSync(realFile);
-    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_WORKSPACE_FILE_BYTES) continue;
-    const buf = fs.readFileSync(realFile);
+  for (const relativePath of walkWorkspaceDocs(realDocsRoot)) {
+    const filename = path.join(realDocsRoot, relativePath);
+    const stat = fs.statSync(filename);
+    if (stat.size === 0 || stat.size > MAX_WORKSPACE_FILE_BYTES) continue;
+    const buf = fs.readFileSync(filename);
     if (buf.includes(0)) continue;
-    const relPath = `docs/${entry.name}`;
+    const relPath = `docs/${relativePath}`;
     gatewayStore.addKnowledgeDoc(relPath, buf.toString('utf8'), 'workspace');
     importedFiles.push(relPath);
   }
@@ -948,23 +840,22 @@ app.post('/api/mcp/messages', (req, res) => {
 
 /* ---------- Engineering Docs & Prototype Routes ---------- */
 app.get('/api/docs', (_req, res) => {
-  const docs = DOC_REGISTRY.map((entry) => readDocEntry(entry.slug)?.meta).filter(Boolean);
-  res.json({ docs });
+  res.json({ docs: listWorkspaceDocs(DOCS_DIR) });
 });
 
 app.get('/api/docs/:slug', (req, res) => {
   const slug = String(req.params.slug || '');
-  const result = readDocEntry(slug);
+  const result = findWorkspaceDoc(DOCS_DIR, slug);
   if (!result) {
     res.status(404).json({ error: 'Document not found' });
     return;
   }
-  res.json({ ...result.meta, content: result.content });
+  res.json(result);
 });
 
 app.get('/raw/:slug', (req, res) => {
   const slug = String(req.params.slug || '');
-  const result = readDocEntry(slug);
+  const result = findWorkspaceDoc(DOCS_DIR, slug);
   if (!result) {
     res.status(404).type('text/plain; charset=utf-8').send('Document not found');
     return;
@@ -972,8 +863,8 @@ app.get('/raw/:slug', (req, res) => {
   res.type('text/markdown; charset=utf-8').send(result.content);
 });
 
-if (fs.existsSync(PROTYPE_DIR)) {
-  app.use('/protype', express.static(PROTYPE_DIR));
+if (fs.existsSync(PROTOTYPE_DIR)) {
+  app.use(['/prototype', '/protype'], express.static(PROTOTYPE_DIR));
 }
 
 async function startServer() {
