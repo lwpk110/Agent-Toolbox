@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
 import { downstreamPool } from './downstreamPool';
+import { GatewayPersistence, type PersistedGatewayState } from './persistence';
 import type {
   AuditRpcEvent,
   CacheHitPoint,
@@ -40,21 +41,15 @@ import type {
 const FULL_EXPOSURE_TOKENS = 18170;
 const META_TOOLS_TOKENS = 1580;
 
-// Ephemeral AES-256-GCM master key (uses server-side env var when configured, otherwise secure random bytes in memory)
-const VAULT_MASTER_KEY = crypto
-  .createHash('sha256')
-  .update(process.env.TOOLBOX_VAULT_MASTER_KEY || crypto.randomBytes(32))
-  .digest();
-
 interface EncryptedSecret {
   iv: string;
   tag: string;
   ciphertext: string;
 }
 
-function encryptSecret(plaintext: string): EncryptedSecret {
+function encryptSecret(plaintext: string, masterKey: Buffer): EncryptedSecret {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', VAULT_MASTER_KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return {
@@ -64,10 +59,10 @@ function encryptSecret(plaintext: string): EncryptedSecret {
   };
 }
 
-function decryptSecret(record: EncryptedSecret): string {
+function decryptSecret(record: EncryptedSecret, masterKey: Buffer): string {
   const decipher = crypto.createDecipheriv(
     'aes-256-gcm',
-    VAULT_MASTER_KEY,
+    masterKey,
     Buffer.from(record.iv, 'hex')
   );
   decipher.setAuthTag(Buffer.from(record.tag, 'hex'));
@@ -489,6 +484,7 @@ export const SANDBOX_SCENARIOS = [
 
 export class GatewayStore {
   public readonly events = new EventEmitter();
+  private readonly persistence: GatewayPersistence;
 
   private hosts: HostProfile[] = [
     {
@@ -1284,12 +1280,56 @@ export class GatewayStore {
   private pendingApprovals: HitlApproval[] = [];
   private auditLogs: AuditRpcEvent[] = [];
 
+  constructor(options: { dataFile?: string } = {}) {
+    this.persistence = new GatewayPersistence(options.dataFile);
+    const saved = this.persistence.load();
+    if (saved) this.restoreState(saved);
+    else this.scheduleSave();
+  }
+
+  private persistedState(): PersistedGatewayState {
+    return {
+      hosts: this.hosts,
+      middleware: this.middleware,
+      servers: this.servers,
+      quarantines: this.quarantines,
+      skills: this.skills,
+      docs: this.docs,
+      memories: this.memories,
+      vectorHealth: this.vectorHealth,
+      vaultEntries: this.vaultEntries,
+      encryptedSecrets: Object.fromEntries(this.encryptedSecrets),
+      sync: this.sync,
+      lastSyncedManifestJson: this.lastSyncedManifestJson,
+      pendingApprovals: this.pendingApprovals,
+      auditLogs: this.auditLogs,
+    };
+  }
+
+  private restoreState(saved: PersistedGatewayState): void {
+    const arrayFields = ['hosts', 'middleware', 'servers', 'quarantines', 'skills', 'docs', 'memories', 'vaultEntries', 'pendingApprovals', 'auditLogs'] as const;
+    for (const field of arrayFields) {
+      if (Array.isArray(saved[field])) Object.assign(this, { [field]: saved[field] });
+    }
+    if (saved.vectorHealth && typeof saved.vectorHealth === 'object') this.vectorHealth = saved.vectorHealth as VectorHealthStats;
+    if (saved.sync && typeof saved.sync === 'object') this.sync = saved.sync as SyncStatus;
+    if (typeof saved.lastSyncedManifestJson === 'string') this.lastSyncedManifestJson = saved.lastSyncedManifestJson;
+    if (saved.encryptedSecrets && typeof saved.encryptedSecrets === 'object' && !Array.isArray(saved.encryptedSecrets)) {
+      this.encryptedSecrets = new Map(Object.entries(saved.encryptedSecrets as Record<string, EncryptedSecret>));
+    }
+  }
+
+  private scheduleSave(): void {
+    this.persistence.schedule(this.persistedState());
+  }
+
   private emitEvent(type: string, payload: unknown) {
     this.events.emit('gateway-event', {
       type,
       timestamp: new Date().toISOString(),
       payload,
     });
+    this.scheduleSave();
   }
 
   private markDirty() {
@@ -2537,7 +2577,7 @@ export class GatewayStore {
     }
 
     // Encrypt at rest; plaintext never persisted in VaultEntry
-    this.encryptedSecrets.set(cleanKey, encryptSecret(plaintext.trim()));
+    this.encryptedSecrets.set(cleanKey, encryptSecret(plaintext.trim(), this.persistence.vaultKey));
     const masked = maskSecret(plaintext.trim());
     const now = new Date().toISOString();
 
@@ -2588,7 +2628,7 @@ export class GatewayStore {
     // Also redact any real user-stored secret in the encrypted Vault
     for (const enc of this.encryptedSecrets.values()) {
       try {
-        const plain = decryptSecret(enc);
+        const plain = decryptSecret(enc, this.persistence.vaultKey);
         if (plain.length >= 8 && output.includes(plain)) {
           output = output.split(plain).join('[REDACTED_BY_TOOLBOX]');
         }
@@ -2630,6 +2670,7 @@ export class GatewayStore {
 
   public pullFromGitHub(): { status: string; sync: SyncStatus } {
     this.sync.lastSyncedAt = new Date().toISOString();
+    this.scheduleSave();
     return { status: `已是最新：GitHub 远端 ${this.sync.branch} 分支没有新的改动。`, sync: this.sync };
   }
 
@@ -3151,7 +3192,7 @@ export class GatewayStore {
         return `vault://${keyName}`;
       }
       try {
-        return decryptSecret(enc);
+        return decryptSecret(enc, this.persistence.vaultKey);
       } catch {
         missingKeys.push(keyName);
         return `vault://${keyName}`;
