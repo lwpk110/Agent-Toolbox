@@ -3,6 +3,7 @@ import type {
   ExposureMode,
   GatewayStateSnapshot,
   HostScope,
+  MiddlewareId,
   MiddlewareRule,
   SkillSourceType,
   TransportProtocol,
@@ -79,7 +80,7 @@ export default function App() {
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
     if (toastTimerRef.current) window.clearTimeout(toastTimerRef.current);
-    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 2400);
+    toastTimerRef.current = window.setTimeout(() => setToastMsg(null), 2600);
   }, []);
 
   useEffect(() => {
@@ -115,14 +116,24 @@ export default function App() {
     const eventNames = [
       'quarantine.detected',
       'quarantine.resolved',
+      'server.added',
+      'server.updated',
+      'server.deleted',
+      'host.added',
+      'host.deleted',
       'skill.mounted',
       'skill.unmounted',
       'skill.created',
       'skill.updated',
+      'kb.doc_added',
+      'kb.doc_updated',
+      'kb.doc_deleted',
       'hitl.pending',
       'hitl.resolved',
       'vault.updated',
+      'vault.deleted',
       'sync.pushed',
+      'sync.config_updated',
     ];
     eventNames.forEach((ev) => es.addEventListener(ev, refresh));
     return () => es.close();
@@ -166,9 +177,38 @@ export default function App() {
     showToast(`${rule.name}${nextEnabled ? ' 已开启' : ' 已关闭'}`);
   };
 
+  const handleUpdateMiddlewareConfig = async (
+    id: MiddlewareId,
+    config: { maxTokensPerTurn?: number }
+  ) => {
+    const next = await api.updateMiddlewareConfig(id, config);
+    setState(next);
+    if (typeof config.maxTokensPerTurn === 'number') {
+      showToast(`Token 预算上限已调整为 ${config.maxTokensPerTurn.toLocaleString('en-US')} / 轮`);
+    }
+  };
+
   const handleChangeHostScope = async (hostId: string, scope: HostScope) => {
     const next = await api.updateHostScope(hostId, scope);
     setState(next);
+    showToast('已更新宿主权限策略');
+  };
+
+  const handleAddHost = async (payload: {
+    name: string;
+    scope: HostScope;
+    transport?: 'stdio' | 'sse';
+  }) => {
+    const res = await api.addHost(payload);
+    setState(res.data);
+    showToast(`已新增自定义宿主：${payload.name}`);
+    return res.hostId;
+  };
+
+  const handleDeleteHost = async (hostId: string, hostName: string) => {
+    const next = await api.deleteHost(hostId);
+    setState(next);
+    showToast(`已移除自定义宿主：${hostName}`);
   };
 
   const handleUpdateTool = async (
@@ -212,6 +252,9 @@ export default function App() {
     name: string;
     protocol: TransportProtocol;
     commandOrUrl: string;
+    args?: string[];
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
     defaultMode: ExposureMode;
     secretRef?: string;
     initialToolName?: string;
@@ -220,6 +263,54 @@ export default function App() {
     const next = await api.addServer(payload);
     setState(next);
     showToast(`已接入 MCP Server：${payload.name}`);
+  };
+
+  const handleImportMcpJson = async (rawJson: string, defaultMode: ExposureMode) => {
+    const res = await api.importMcpJson(rawJson, defaultMode);
+    setState(res.data);
+    const skipText = res.skippedIds.length ? `（跳过 ${res.skippedIds.length} 个重复项）` : '';
+    showToast(`已导入 ${res.addedIds.length} 个 MCP Server${skipText}`);
+    return { addedIds: res.addedIds, skippedIds: res.skippedIds };
+  };
+
+  const handleUpdateServer = async (
+    serverId: string,
+    patch: {
+      protocol?: TransportProtocol;
+      commandOrUrl?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      headers?: Record<string, string>;
+      enabled?: boolean;
+      secretRef?: string;
+    }
+  ) => {
+    const next = await api.updateServer(serverId, patch);
+    setState(next);
+    if (typeof patch.enabled === 'boolean' && Object.keys(patch).length === 1) {
+      showToast(`${serverId} 已${patch.enabled ? '启用' : '停用'}`);
+    } else {
+      showToast(`已更新 MCP Server：${serverId}`);
+    }
+  };
+
+  const handleDeleteServer = async (serverId: string, serverName: string) => {
+    const next = await api.deleteServer(serverId);
+    setState(next);
+    showToast(`已移除 MCP Server：${serverName}`);
+  };
+
+  const handleSetServerToolsMode = async (serverId: string, mode: ExposureMode) => {
+    const next = await api.setServerToolsMode(serverId, mode);
+    setState(next);
+    showToast(`已将 ${serverId} 下全部工具设为 ${mode === 'pinned' ? 'Pinned 常驻' : 'Lazy 按需'}`);
+  };
+
+  const handlePingServer = async (serverId: string, serverName: string) => {
+    const next = await api.pingServer(serverId);
+    setState(next);
+    const updated = next.servers.find((s) => s.id === serverId);
+    showToast(`Ping ${serverName}：${updated?.latencyMs ?? '--'}ms`);
   };
 
   const handleResolveHitl = async (approvalId: string, decision: 'approve' | 'reject') => {
@@ -291,15 +382,53 @@ export default function App() {
   };
 
   const handleAddDoc = async (filePath: string, content: string) => {
-    const next = await api.addKnowledgeDoc(filePath, content);
+    const next = await api.addKnowledgeDoc(filePath, content, 'manual');
     setState(next);
     showToast(`已收录文档：${filePath}`);
   };
 
-  const handleAddMemory = async (host: string, topic: string, content: string) => {
-    const next = await api.addMemory(host, topic, content);
+  const handleBatchAddDocs = async (docs: Array<{ filePath: string; content: string }>) => {
+    const res = await api.batchAddKnowledgeDocs(docs);
+    setState(res.data);
+    showToast(`已批量收录 ${res.importedCount} 篇本地文档并完成切片`);
+  };
+
+  const handleImportWorkspaceDocs = async () => {
+    const res = await api.importWorkspaceDocs();
+    setState(res.data);
+    showToast(`已从工作区 docs/ 收录 ${res.importedCount} 篇工程文档`);
+  };
+
+  const handleUpdateDoc = async (docId: string, content: string) => {
+    const next = await api.updateKnowledgeDoc(docId, content);
+    setState(next);
+    showToast('已更新文档并重新切片');
+  };
+
+  const handleDeleteDoc = async (docId: string, filePath: string) => {
+    const next = await api.deleteKnowledgeDoc(docId);
+    setState(next);
+    showToast(`已移除知识库文档：${filePath}`);
+  };
+
+  const handleAddMemory = async (
+    host: string,
+    topic: string,
+    content: string,
+    scope: 'global' | 'project' = 'global'
+  ) => {
+    const next = await api.addMemory(host, topic, content, scope);
     setState(next);
     showToast('已记录共享 Memory');
+  };
+
+  const handleUpdateMemory = async (
+    id: string,
+    patch: { topic?: string; content?: string; scope?: 'global' | 'project' }
+  ) => {
+    const next = await api.updateMemory(id, patch);
+    setState(next);
+    showToast('已更新共享 Memory');
   };
 
   const handleDeleteMemory = async (id: string) => {
@@ -320,17 +449,29 @@ export default function App() {
     showToast(`已存入 Vault：vault://${key}`);
   };
 
+  const handleDeleteVaultKey = async (key: string) => {
+    const next = await api.deleteVaultSecret(key);
+    setState(next);
+    showToast(`已删除密钥：vault://${key}`);
+  };
+
+  const handleUpdateSyncConfig = async (repo: string, branch: string) => {
+    const next = await api.updateSyncConfig(repo, branch);
+    setState(next);
+    showToast(`已更新同步仓库：${repo} · ${branch}`);
+  };
+
   const handlePull = async () => {
     const res = await api.pullGitHub();
     setState(res.data);
     showToast(res.message || '已是最新：GitHub 上没有新的改动');
   };
 
-  const handlePush = async () => {
+  const handlePush = async (commitMessage?: string) => {
     try {
-      const next = await api.pushGitHub();
+      const next = await api.pushGitHub(commitMessage);
       setState(next);
-      showToast('已推送到 GitHub · main');
+      showToast(`已推送到 ${next.sync.repo} · ${next.sync.branch}`);
     } catch (err) {
       showToast(err instanceof Error ? err.message : '推送被安全门禁拦截');
     }
@@ -338,6 +479,15 @@ export default function App() {
 
   const handleRunSandboxStep = async (host: string, stepIndex: number) => {
     const res = await api.runSandboxRpc({ host, stepIndex });
+    setState(res.data);
+  };
+
+  const handleRunCustomRpc = async (
+    host: string,
+    method: string,
+    argumentsObj: Record<string, unknown>
+  ) => {
+    const res = await api.runSandboxRpc({ host, method, argumentsObj });
     setState(res.data);
   };
 
@@ -468,7 +618,10 @@ export default function App() {
               state={state}
               onNavigate={navigate}
               onToggleMiddleware={handleToggleMiddleware}
+              onUpdateMiddlewareConfig={handleUpdateMiddlewareConfig}
               onChangeHostScope={handleChangeHostScope}
+              onAddHost={handleAddHost}
+              onDeleteHost={handleDeleteHost}
               onCopy={handleCopy}
             />
           ) : view === 'gateway' ? (
@@ -478,6 +631,11 @@ export default function App() {
               onResolveQuarantine={handleResolveQuarantine}
               onSimulateQuarantine={handleSimulateQuarantine}
               onAddServer={handleAddServer}
+              onImportMcpJson={handleImportMcpJson}
+              onUpdateServer={handleUpdateServer}
+              onDeleteServer={handleDeleteServer}
+              onSetServerToolsMode={handleSetServerToolsMode}
+              onPingServer={handlePingServer}
               onResolveHitl={handleResolveHitl}
             />
           ) : view === 'skills' ? (
@@ -496,7 +654,12 @@ export default function App() {
               state={state}
               onMountSkill={handleMountSkill}
               onAddDoc={handleAddDoc}
+              onBatchAddDocs={handleBatchAddDocs}
+              onImportWorkspaceDocs={handleImportWorkspaceDocs}
+              onUpdateDoc={handleUpdateDoc}
+              onDeleteDoc={handleDeleteDoc}
               onAddMemory={handleAddMemory}
+              onUpdateMemory={handleUpdateMemory}
               onDeleteMemory={handleDeleteMemory}
               onRebuildIndex={handleRebuildIndex}
             />
@@ -504,8 +667,11 @@ export default function App() {
             <SyncVaultView
               state={state}
               onSetVaultKey={handleSetVaultKey}
+              onDeleteVaultKey={handleDeleteVaultKey}
+              onUpdateSyncConfig={handleUpdateSyncConfig}
               onPull={handlePull}
               onPush={handlePush}
+              onToast={showToast}
             />
           ) : (
             <SandboxDocsView
@@ -513,6 +679,7 @@ export default function App() {
               tab={sandboxTab}
               onTabChange={setSandboxTab}
               onRunStep={handleRunSandboxStep}
+              onRunCustomRpc={handleRunCustomRpc}
               onToast={showToast}
             />
           )}

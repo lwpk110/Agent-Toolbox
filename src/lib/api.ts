@@ -32,6 +32,17 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
 export const api = {
   getState: () => requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/state').then((r) => r.data),
 
+  addHost: (payload: { name: string; scope: HostScope; transport?: 'stdio' | 'sse' }) =>
+    requestJson<{ ok: true; hostId?: string; data: GatewayStateSnapshot }>('/api/v1/hosts', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+
+  deleteHost: (hostId: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/hosts/${encodeURIComponent(hostId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
+
   updateHostScope: (hostId: string, scope: HostScope) =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/hosts/${encodeURIComponent(hostId)}/scope`, {
       method: 'PATCH',
@@ -44,10 +55,28 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }).then((r) => r.data),
 
+  updateMiddlewareConfig: (id: MiddlewareId, config: { maxTokensPerTurn?: number }) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/middleware/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ config }),
+    }).then((r) => r.data),
+
+  importMcpJson: (rawJson: string, defaultMode: ExposureMode) =>
+    requestJson<{ ok: true; addedIds: string[]; skippedIds: string[]; data: GatewayStateSnapshot }>(
+      '/api/v1/servers/import-json',
+      {
+        method: 'POST',
+        body: JSON.stringify({ rawJson, defaultMode }),
+      }
+    ),
+
   addServer: (payload: {
     name: string;
     protocol: TransportProtocol;
     commandOrUrl: string;
+    args?: string[];
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
     defaultMode: ExposureMode;
     secretRef?: string;
     initialToolName?: string;
@@ -57,6 +86,37 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(payload),
     }).then((r) => r.data),
+
+  updateServer: (
+    serverId: string,
+    patch: {
+      protocol?: TransportProtocol;
+      commandOrUrl?: string;
+      args?: string[];
+      env?: Record<string, string>;
+      headers?: Record<string, string>;
+      enabled?: boolean;
+      secretRef?: string;
+    }
+  ) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/servers/${encodeURIComponent(serverId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }).then((r) => r.data),
+
+  deleteServer: (serverId: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/servers/${encodeURIComponent(serverId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
+
+  setServerToolsMode: (serverId: string, mode: ExposureMode) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(
+      `/api/v1/servers/${encodeURIComponent(serverId)}/tools-mode`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify({ mode }),
+      }
+    ).then((r) => r.data),
 
   pingServer: (serverId: string) =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/servers/${encodeURIComponent(serverId)}/ping`, {
@@ -158,16 +218,45 @@ export const api = {
       body: JSON.stringify({ query }),
     }).then((r) => r.data),
 
-  addKnowledgeDoc: (filePath: string, content: string) =>
+  addKnowledgeDoc: (filePath: string, content: string, sourceType?: 'manual' | 'upload' | 'workspace') =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/kb/docs', {
       method: 'POST',
-      body: JSON.stringify({ filePath, content }),
+      body: JSON.stringify({ filePath, content, sourceType }),
     }).then((r) => r.data),
 
-  addMemory: (host: string, topic: string, content: string) =>
+  batchAddKnowledgeDocs: (docs: Array<{ filePath: string; content: string }>) =>
+    requestJson<{ ok: true; importedCount: number; data: GatewayStateSnapshot }>('/api/v1/kb/docs/batch', {
+      method: 'POST',
+      body: JSON.stringify({ docs }),
+    }),
+
+  importWorkspaceDocs: () =>
+    requestJson<{ ok: true; importedCount: number; importedFiles: string[]; data: GatewayStateSnapshot }>(
+      '/api/v1/kb/import-workspace-docs',
+      { method: 'POST' }
+    ),
+
+  updateKnowledgeDoc: (docId: string, content: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/kb/docs/${encodeURIComponent(docId)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }).then((r) => r.data),
+
+  deleteKnowledgeDoc: (docId: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/kb/docs/${encodeURIComponent(docId)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
+
+  addMemory: (host: string, topic: string, content: string, scope: 'global' | 'project' = 'global') =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/kb/memories', {
       method: 'POST',
-      body: JSON.stringify({ host, topic, content }),
+      body: JSON.stringify({ host, topic, content, scope }),
+    }).then((r) => r.data),
+
+  updateMemory: (id: string, patch: { topic?: string; content?: string; scope?: 'global' | 'project' }) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/kb/memories/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
     }).then((r) => r.data),
 
   deleteMemory: (id: string) =>
@@ -186,14 +275,26 @@ export const api = {
       body: JSON.stringify({ value, serviceName }),
     }).then((r) => r.data),
 
+  deleteVaultSecret: (key: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/vault/${encodeURIComponent(key)}`, {
+      method: 'DELETE',
+    }).then((r) => r.data),
+
+  updateSyncConfig: (repo: string, branch: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/sync/config', {
+      method: 'PATCH',
+      body: JSON.stringify({ repo, branch }),
+    }).then((r) => r.data),
+
   pullGitHub: () =>
     requestJson<{ ok: true; message: string; data: GatewayStateSnapshot }>('/api/v1/sync/pull', {
       method: 'POST',
     }),
 
-  pushGitHub: () =>
+  pushGitHub: (commitMessage?: string) =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/sync/push', {
       method: 'POST',
+      body: JSON.stringify({ commitMessage }),
     }).then((r) => r.data),
 
   resolveHitl: (approvalId: string, decision: 'approve' | 'reject') =>

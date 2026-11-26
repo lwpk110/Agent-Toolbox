@@ -264,6 +264,19 @@ textarea.input { height: auto; padding: var(--s2) var(--s3); line-height: 1.5; r
 .tree-tier.human { color: var(--ink-2); opacity: 0.8; }
 .skill-file-pane { padding: var(--s4); display: grid; gap: var(--s3); align-content: start; min-width: 0; }
 .tag { display: inline-block; padding: 1px 6px; border: 1px solid var(--line); border-radius: 4px; font-size: 11px; color: var(--ink-2); background: var(--bg); line-height: 1.4; white-space: nowrap; }
+.tag.ok { border-color: rgba(26,127,55,0.35); background: var(--ok-soft); color: var(--ok); }
+.tag.bad { border-color: rgba(207,34,46,0.35); background: var(--bad-soft); color: var(--bad); }
+.tag.warn { border-color: rgba(154,103,0,0.35); background: var(--warn-soft); color: var(--warn); }
+.tag.info { border-color: rgba(9,105,218,0.35); background: var(--link-soft); color: var(--link); }
+.chip-btn { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 4px; background: var(--subtle); color: var(--ink-2); font-size: var(--fs-12); cursor: pointer; transition: background var(--dur) ease-out, border-color var(--dur) ease-out, color var(--dur) ease-out; }
+@media (hover: hover) { .chip-btn:hover { background: var(--link-soft); border-color: rgba(9,105,218,0.4); color: var(--link); } }
+.budget-track { width: 100%; height: 6px; border-radius: 4px; background: var(--inset); overflow: hidden; }
+.budget-fill { height: 100%; border-radius: 4px; background: var(--pri); transition: width 220ms ease-out; }
+.budget-fill.warn { background: var(--warn); }
+.budget-fill.bad { background: var(--bad); }
+.list-row.clickable { cursor: pointer; transition: background var(--dur) ease-out; }
+@media (hover: hover) { .list-row.clickable:hover { background: var(--subtle); } }
+.srv-subbar { display: flex; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s2) var(--s5); background: var(--subtle); border-bottom: 1px solid var(--line-row); flex-wrap: wrap; }
 .drop-zone { border: 1px dashed var(--line); border-radius: var(--r); padding: var(--s4); background: var(--subtle); display: grid; gap: var(--s2); }
 .cand-item { display: grid; gap: 4px; width: 100%; padding: 10px var(--s3); border: 1px solid var(--line); border-radius: var(--r); background: var(--bg); text-align: left; cursor: pointer; }
 .cand-item[aria-current="true"] { border-color: var(--link); background: var(--link-soft); }

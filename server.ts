@@ -326,6 +326,31 @@ app.get('/api/v1/events', (req, res) => {
   });
 });
 
+app.post('/api/v1/hosts', (req, res) => {
+  const { name, scope, transport } = req.body || {};
+  if (typeof name !== 'string' || !name.trim()) {
+    sendErr(res, 400, 'INVALID_HOST', '请填写宿主名称。');
+    return;
+  }
+  const safeScope: HostScope = ['full', 'audit', 'min'].includes(scope) ? scope : 'audit';
+  const safeTransport: 'stdio' | 'sse' = transport === 'sse' ? 'sse' : 'stdio';
+  const result = gatewayStore.addHost({ name, scope: safeScope, transport: safeTransport });
+  if (result.error) {
+    sendErr(res, 400, 'HOST_CREATE_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), { hostId: result.host?.id });
+});
+
+app.delete('/api/v1/hosts/:id', (req, res) => {
+  const result = gatewayStore.deleteHost(req.params.id);
+  if (!result.ok) {
+    sendErr(res, 400, 'HOST_DELETE_FAILED', result.error || '无法删除宿主。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
 app.patch('/api/v1/hosts/:id/scope', (req, res) => {
   const scope = req.body?.scope as HostScope;
   if (!['full', 'audit', 'min'].includes(scope)) {
@@ -342,17 +367,45 @@ app.patch('/api/v1/hosts/:id/scope', (req, res) => {
 
 app.patch('/api/v1/middleware/:id', (req, res) => {
   const id = req.params.id as MiddlewareId;
-  const enabled = req.body?.enabled;
-  if (!['vault', 'quarantine', 'hitl', 'redact', 'budget'].includes(id) || typeof enabled !== 'boolean') {
-    sendErr(res, 400, 'INVALID_MIDDLEWARE', '无效的中间件标识或开关状态。');
+  const { enabled, config } = req.body || {};
+  if (!['vault', 'quarantine', 'hitl', 'redact', 'budget'].includes(id)) {
+    sendErr(res, 400, 'INVALID_MIDDLEWARE', '无效的中间件标识。');
     return;
   }
-  gatewayStore.toggleMiddleware(id, enabled);
+  if (typeof enabled !== 'boolean' && (!config || typeof config !== 'object')) {
+    sendErr(res, 400, 'INVALID_MIDDLEWARE', '请提供开关状态或配置参数。');
+    return;
+  }
+  if (typeof enabled === 'boolean') {
+    gatewayStore.toggleMiddleware(id, enabled);
+  }
+  if (config && typeof config === 'object' && typeof config.maxTokensPerTurn === 'number') {
+    gatewayStore.updateMiddlewareConfig(id, { maxTokensPerTurn: config.maxTokensPerTurn });
+  }
   sendOk(res, gatewayStore.getSnapshot());
 });
 
+app.post('/api/v1/servers/import-json', (req, res) => {
+  const { rawJson, defaultMode } = req.body || {};
+  if (typeof rawJson !== 'string' || !rawJson.trim()) {
+    sendErr(res, 400, 'INVALID_JSON', '请粘贴标准 mcp.json 内容。');
+    return;
+  }
+  const mode: ExposureMode = defaultMode === 'pinned' ? 'pinned' : 'lazy';
+  const result = gatewayStore.importMcpJson(rawJson, mode);
+  if (result.error) {
+    sendErr(res, 400, 'MCP_JSON_IMPORT_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), {
+    addedIds: result.addedIds,
+    skippedIds: result.skippedIds,
+  });
+});
+
 app.post('/api/v1/servers', (req, res) => {
-  const { name, protocol, commandOrUrl, defaultMode, secretRef, initialToolName, initialToolDesc } = req.body || {};
+  const { name, protocol, commandOrUrl, args, env, headers, defaultMode, secretRef, initialToolName, initialToolDesc } =
+    req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     sendErr(res, 400, 'INVALID_NAME', '请填写 MCP Server 命名空间名称。');
     return;
@@ -370,6 +423,9 @@ app.post('/api/v1/servers', (req, res) => {
     name,
     protocol: protocol as TransportProtocol,
     commandOrUrl,
+    args: Array.isArray(args) ? args.map(String) : undefined,
+    env: env && typeof env === 'object' && !Array.isArray(env) ? env : undefined,
+    headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : undefined,
     defaultMode: mode,
     secretRef: typeof secretRef === 'string' ? secretRef : undefined,
     initialToolName: typeof initialToolName === 'string' ? initialToolName : undefined,
@@ -377,6 +433,48 @@ app.post('/api/v1/servers', (req, res) => {
   });
   if (result.error) {
     sendErr(res, 400, 'SERVER_CREATE_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.patch('/api/v1/servers/:id', (req, res) => {
+  const { protocol, commandOrUrl, args, env, headers, enabled, secretRef } = req.body || {};
+  const result = gatewayStore.updateServer(req.params.id, {
+    protocol: ['stdio', 'sse', 'http'].includes(protocol) ? (protocol as TransportProtocol) : undefined,
+    commandOrUrl: typeof commandOrUrl === 'string' ? commandOrUrl : undefined,
+    args: Array.isArray(args) ? args.map(String) : undefined,
+    env: env && typeof env === 'object' && !Array.isArray(env) ? env : undefined,
+    headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : undefined,
+    enabled: typeof enabled === 'boolean' ? enabled : undefined,
+    secretRef: typeof secretRef === 'string' ? secretRef : undefined,
+  });
+  if (result.error) {
+    const status = result.error.includes('未找到') ? 404 : 400;
+    sendErr(res, status, 'SERVER_UPDATE_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.delete('/api/v1/servers/:id', (req, res) => {
+  const ok = gatewayStore.deleteServer(req.params.id);
+  if (!ok) {
+    sendErr(res, 404, 'SERVER_NOT_FOUND', '未找到指定的 MCP Server。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.patch('/api/v1/servers/:id/tools-mode', (req, res) => {
+  const mode = req.body?.mode;
+  if (mode !== 'pinned' && mode !== 'lazy') {
+    sendErr(res, 400, 'INVALID_MODE', '加载方式仅支持 pinned 或 lazy。');
+    return;
+  }
+  const updated = gatewayStore.setServerToolsMode(req.params.id, mode);
+  if (!updated) {
+    sendErr(res, 404, 'SERVER_NOT_FOUND', '未找到指定的 MCP Server。');
     return;
   }
   sendOk(res, gatewayStore.getSnapshot());
@@ -589,17 +687,102 @@ app.post('/api/v1/kb/search', (req, res) => {
 });
 
 app.post('/api/v1/kb/docs', (req, res) => {
-  const { filePath, content } = req.body || {};
+  const { filePath, content, sourceType } = req.body || {};
   if (typeof filePath !== 'string' || !filePath.trim() || typeof content !== 'string' || !content.trim()) {
     sendErr(res, 400, 'INVALID_DOC', '请填写文档路径与正文内容。');
     return;
   }
-  gatewayStore.addKnowledgeDoc(filePath, content);
+  const safeSource = sourceType === 'upload' || sourceType === 'workspace' ? sourceType : 'manual';
+  gatewayStore.addKnowledgeDoc(filePath, content, safeSource);
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.post('/api/v1/kb/docs/batch', (req, res) => {
+  const docs = req.body?.docs;
+  if (!Array.isArray(docs) || docs.length === 0) {
+    sendErr(res, 400, 'INVALID_BATCH', '请至少上传一个 Markdown 或文本文档。');
+    return;
+  }
+  if (docs.length > 20) {
+    sendErr(res, 400, 'TOO_MANY_DOCS', '单次最多批量导入 20 篇文档。');
+    return;
+  }
+  let importedCount = 0;
+  for (const item of docs) {
+    if (!item || typeof item.filePath !== 'string' || typeof item.content !== 'string') continue;
+    if (!item.filePath.trim() || !item.content.trim()) continue;
+    if (Buffer.byteLength(item.content, 'utf8') > MAX_WORKSPACE_FILE_BYTES) continue;
+    gatewayStore.addKnowledgeDoc(item.filePath, item.content, 'upload');
+    importedCount += 1;
+  }
+  if (importedCount === 0) {
+    sendErr(res, 400, 'NO_VALID_DOCS', '未解析到有效的非空文档内容。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), { importedCount });
+});
+
+app.post('/api/v1/kb/import-workspace-docs', (_req, res) => {
+  if (!fs.existsSync(DOCS_DIR)) {
+    sendErr(res, 404, 'DOCS_DIR_NOT_FOUND', '当前工作区不存在 docs/ 目录。');
+    return;
+  }
+  const realDocsRoot = fs.realpathSync(DOCS_DIR);
+  const entries = fs.readdirSync(realDocsRoot, { withFileTypes: true });
+  const importedFiles: string[] = [];
+
+  for (const entry of entries) {
+    if (importedFiles.length >= 20) break;
+    if (entry.name.startsWith('.') || !entry.name.toLowerCase().endsWith('.md')) continue;
+    const candidate = path.join(realDocsRoot, entry.name);
+    let realFile: string;
+    try {
+      realFile = fs.realpathSync(candidate);
+    } catch {
+      continue;
+    }
+    if (!realFile.startsWith(realDocsRoot + path.sep)) continue;
+    const stat = fs.statSync(realFile);
+    if (!stat.isFile() || stat.size === 0 || stat.size > MAX_WORKSPACE_FILE_BYTES) continue;
+    const buf = fs.readFileSync(realFile);
+    if (buf.includes(0)) continue;
+    const relPath = `docs/${entry.name}`;
+    gatewayStore.addKnowledgeDoc(relPath, buf.toString('utf8'), 'workspace');
+    importedFiles.push(relPath);
+  }
+
+  if (importedFiles.length === 0) {
+    sendErr(res, 400, 'NO_DOCS_FOUND', 'docs/ 目录下未发现可索引的 Markdown 文件。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), { importedCount: importedFiles.length, importedFiles });
+});
+
+app.put('/api/v1/kb/docs/:id', (req, res) => {
+  const content = req.body?.content;
+  if (typeof content !== 'string' || !content.trim()) {
+    sendErr(res, 400, 'INVALID_DOC', '文档正文不能为空。');
+    return;
+  }
+  const updated = gatewayStore.updateKnowledgeDoc(req.params.id, content);
+  if (!updated) {
+    sendErr(res, 404, 'DOC_NOT_FOUND', '未找到指定知识库文档。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.delete('/api/v1/kb/docs/:id', (req, res) => {
+  const ok = gatewayStore.deleteKnowledgeDoc(req.params.id);
+  if (!ok) {
+    sendErr(res, 404, 'DOC_NOT_FOUND', '未找到指定知识库文档。');
+    return;
+  }
   sendOk(res, gatewayStore.getSnapshot());
 });
 
 app.post('/api/v1/kb/memories', (req, res) => {
-  const { host, topic, content } = req.body || {};
+  const { host, topic, content, scope } = req.body || {};
   if (typeof content !== 'string' || !content.trim()) {
     sendErr(res, 400, 'INVALID_MEMORY', '请填写共享记忆正文。');
     return;
@@ -607,8 +790,23 @@ app.post('/api/v1/kb/memories', (req, res) => {
   gatewayStore.addMemory(
     typeof host === 'string' ? host : 'Claude Code',
     typeof topic === 'string' ? topic : '工程经验',
-    content
+    content,
+    scope === 'project' ? 'project' : 'global'
   );
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.patch('/api/v1/kb/memories/:id', (req, res) => {
+  const { topic, content, scope } = req.body || {};
+  const updated = gatewayStore.updateMemory(req.params.id, {
+    topic: typeof topic === 'string' ? topic : undefined,
+    content: typeof content === 'string' ? content : undefined,
+    scope: scope === 'project' || scope === 'global' ? scope : undefined,
+  });
+  if (!updated) {
+    sendErr(res, 404, 'MEMORY_NOT_FOUND', '未找到对应记忆条目。');
+    return;
+  }
   sendOk(res, gatewayStore.getSnapshot());
 });
 
@@ -644,8 +842,26 @@ app.put('/api/v1/vault/:key', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
+app.delete('/api/v1/vault/:key', (req, res) => {
+  const result = gatewayStore.deleteVaultSecret(req.params.key);
+  if (!result.ok) {
+    sendErr(res, 404, 'VAULT_NOT_FOUND', result.error || '未找到指定密钥。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
 app.get('/api/v1/sync/preflight', (_req, res) => {
   sendOk(res, gatewayStore.getPreflight());
+});
+
+app.patch('/api/v1/sync/config', (req, res) => {
+  const { repo, branch } = req.body || {};
+  gatewayStore.updateSyncConfig({
+    repo: typeof repo === 'string' ? repo : undefined,
+    branch: typeof branch === 'string' ? branch : undefined,
+  });
+  sendOk(res, gatewayStore.getSnapshot());
 });
 
 app.post('/api/v1/sync/pull', (_req, res) => {
@@ -653,8 +869,9 @@ app.post('/api/v1/sync/pull', (_req, res) => {
   sendOk(res, gatewayStore.getSnapshot(), { message: result.status });
 });
 
-app.post('/api/v1/sync/push', (_req, res) => {
-  const result = gatewayStore.pushToGitHub();
+app.post('/api/v1/sync/push', (req, res) => {
+  const commitMessage = typeof req.body?.commitMessage === 'string' ? req.body.commitMessage : undefined;
+  const result = gatewayStore.pushToGitHub(commitMessage);
   if (!result.ok) {
     sendErr(res, 409, 'PREFLIGHT_BLOCKED', result.error || '推送前检查未通过。');
     return;

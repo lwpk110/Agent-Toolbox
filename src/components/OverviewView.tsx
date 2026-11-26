@@ -1,5 +1,11 @@
 import { useState, type CSSProperties } from 'react';
-import type { GatewayStateSnapshot, HostScope, MiddlewareRule } from '../types/toolbox';
+import type {
+  GatewayStateSnapshot,
+  HostProfile,
+  HostScope,
+  MiddlewareId,
+  MiddlewareRule,
+} from '../types/toolbox';
 import { ProtoIcon } from './ProtoIcon';
 import { ProtoSeg, ProtoStatus, ProtoSwitch, ProtoTip } from './ProtoPrimitives';
 import { ModalDialog } from './ModalDialog';
@@ -8,23 +14,45 @@ interface OverviewViewProps {
   state: GatewayStateSnapshot;
   onNavigate: (view: 'gateway' | 'skills' | 'kb' | 'sync' | 'sandbox') => void;
   onToggleMiddleware: (rule: MiddlewareRule, nextEnabled: boolean) => Promise<void>;
+  onUpdateMiddlewareConfig: (
+    id: MiddlewareId,
+    config: { maxTokensPerTurn?: number }
+  ) => Promise<void>;
   onChangeHostScope: (hostId: string, scope: HostScope) => Promise<void>;
+  onAddHost: (payload: {
+    name: string;
+    scope: HostScope;
+    transport?: 'stdio' | 'sse';
+  }) => Promise<string | undefined>;
+  onDeleteHost: (hostId: string, hostName: string) => Promise<void>;
   onCopy: (text: string, label: string) => void;
 }
+
+const BUDGET_PRESETS = [3000, 4000, 6000, 8000];
+const HOST_QUICK_PRESETS = ['Cursor', 'Windsurf', 'Cline', 'Zed AI'];
 
 export function OverviewView({
   state,
   onNavigate,
   onToggleMiddleware,
+  onUpdateMiddlewareConfig,
   onChangeHostScope,
+  onAddHost,
+  onDeleteHost,
   onCopy,
 }: OverviewViewProps) {
-  const [configHostId, setConfigHostId] = useState<'antigravity' | 'claude' | 'codex' | 'opencode'>(
-    'antigravity'
-  );
+  const [configHostId, setConfigHostId] = useState<string>('antigravity');
   const [confirmMw, setConfirmMw] = useState<MiddlewareRule | null>(null);
   const [infoTip, setInfoTip] = useState<{ title: string; body: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+
+  // Add / Delete custom host state
+  const [addHostOpen, setAddHostOpen] = useState(false);
+  const [hostName, setHostName] = useState('');
+  const [hostScope, setHostScope] = useState<HostScope>('audit');
+  const [hostTransport, setHostTransport] = useState<'stdio' | 'sse'>('stdio');
+  const [hostErr, setHostErr] = useState('');
+  const [delHostTarget, setDelHostTarget] = useState<HostProfile | null>(null);
 
   const quarantinedServers = state.servers.filter((s) => s.state === 'quarantined');
   const missingKeys = state.vault.filter((v) => !v.configured);
@@ -38,6 +66,31 @@ export function OverviewView({
     setBusyId(rule.id);
     try {
       await onToggleMiddleware(rule, !rule.enabled);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleAddHostSubmit = async () => {
+    if (!hostName.trim()) {
+      setHostErr('请填写宿主名称（例如 Cursor、Windsurf）。');
+      return;
+    }
+    setHostErr('');
+    setBusyId('add-host');
+    try {
+      const newId = await onAddHost({
+        name: hostName.trim(),
+        scope: hostScope,
+        transport: hostTransport,
+      });
+      if (newId) setConfigHostId(newId);
+      setAddHostOpen(false);
+      setHostName('');
+      setHostScope('audit');
+      setHostTransport('stdio');
+    } catch (err) {
+      setHostErr(err instanceof Error ? err.message : '新增失败');
     } finally {
       setBusyId(null);
     }
@@ -144,11 +197,12 @@ export function OverviewView({
         <div className="box-b">
           <div className="topo">
             <div className="topo-col">
-              <span className="cap">你的 AI Agent</span>
+              <span className="cap">你的 AI Agent（{state.hosts.length}）</span>
               {state.hosts.map((h) => (
                 <div key={h.id} className="node">
                   <ProtoIcon name="dot" />
                   <span className="od-fill">{h.name}</span>
+                  {h.custom && <span className="tag">自定义</span>}
                 </div>
               ))}
             </div>
@@ -169,9 +223,9 @@ export function OverviewView({
 
             <div className="topo-col">
               <span className="cap">背后的能力</span>
-              <div className="node">MCP Server · {state.metrics.connectedServers}</div>
+              <div className="node">MCP Server · {state.metrics.connectedServers} 运行中</div>
               <div className="node">Skill · {state.metrics.mountedSkills} 个在用</div>
-              <div className="node">知识库 RAG · Memory</div>
+              <div className="node">知识库 RAG · {state.docs.length} 篇文档</div>
               <div className="node">GitHub 同步与密钥</div>
             </div>
           </div>
@@ -195,6 +249,11 @@ export function OverviewView({
             {state.middleware.map((mw, i) => {
               const isQuarantineAlert =
                 mw.enabled && mw.id === 'quarantine' && quarantinedServers.length > 0;
+              const isBudget = mw.id === 'budget';
+              const maxTok = mw.config?.maxTokensPerTurn ?? 4000;
+              const usedTok = state.metrics.currentExposureTokens;
+              const pct = Math.min(100, Math.round((usedTok / maxTok) * 100));
+              const fillClass = pct >= 95 ? 'bad' : pct >= 75 ? 'warn' : '';
               return (
                 <div key={mw.id}>
                   <span className="n">0{i + 1}</span>
@@ -207,9 +266,52 @@ export function OverviewView({
                     <ProtoStatus kind="off" text="未开启" />
                   ) : isQuarantineAlert ? (
                     <ProtoStatus kind="bad" text={`拦截 ${quarantinedServers.length} 项`} />
+                  ) : isBudget && usedTok > maxTok ? (
+                    <ProtoStatus kind="warn" text="已超预算" />
                   ) : (
                     <ProtoStatus kind="ok" text="运行中" />
                   )}
+
+                  {isBudget && (
+                    <div className="od-stack" style={{ '--od-gap': '6px', marginTop: '4px' } as CSSProperties}>
+                      <div className="od-row" style={{ justifyContent: 'space-between' }}>
+                        <span className="small muted mono">
+                          {usedTok.toLocaleString('en-US')} / {maxTok.toLocaleString('en-US')}
+                        </span>
+                        <span className="small muted mono">{pct}%</span>
+                      </div>
+                      <div className="budget-track" aria-hidden="true">
+                        <div className={`budget-fill ${fillClass}`} style={{ width: `${pct}%` }} />
+                      </div>
+                      <label className="sr-only" htmlFor="budgetLimit">
+                        每轮 Token 预算上限
+                      </label>
+                      <select
+                        id="budgetLimit"
+                        className="input mono"
+                        style={{ height: '26px', fontSize: '12px', padding: '0 8px' }}
+                        value={maxTok}
+                        disabled={busyId === 'budget-cfg'}
+                        onChange={async (e) => {
+                          setBusyId('budget-cfg');
+                          try {
+                            await onUpdateMiddlewareConfig('budget', {
+                              maxTokensPerTurn: Number(e.target.value),
+                            });
+                          } finally {
+                            setBusyId(null);
+                          }
+                        }}
+                      >
+                        {BUDGET_PRESETS.map((v) => (
+                          <option key={v} value={v}>
+                            上限 {v.toLocaleString('en-US')} tok/轮
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   <ProtoSwitch
                     checked={mw.enabled}
                     label={`${mw.name} 开关`}
@@ -227,7 +329,7 @@ export function OverviewView({
       <div className="grid-2" id="h-hosts">
         <section className="box">
           <div className="box-h">
-            <h2>
+            <h2 className="od-fill">
               每个 Agent 能用到什么
               <ProtoTip
                 label="权限"
@@ -235,11 +337,25 @@ export function OverviewView({
                 onOpen={setInfoTip}
               />
             </h2>
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                setHostErr('');
+                setAddHostOpen(true);
+              }}
+            >
+              <ProtoIcon name="plus" />
+              <span>新增宿主</span>
+            </button>
           </div>
           <div className="box-b flush">
             {state.hosts.map((h) => (
               <div key={h.id} className="list-row">
-                <span className="od-fill">{h.name}</span>
+                <div className="od-fill od-row" style={{ '--od-gap': '6px' } as CSSProperties}>
+                  <span className="od-truncate">{h.name}</span>
+                  {h.custom && <span className="tag">自定义</span>}
+                </div>
                 <ProtoSeg
                   label={`${h.name} 的权限`}
                   items={
@@ -252,6 +368,16 @@ export function OverviewView({
                   value={h.scope}
                   onChange={(val) => onChangeHostScope(h.id, val)}
                 />
+                {h.custom && (
+                  <button
+                    type="button"
+                    className="btn sm danger"
+                    aria-label={`删除宿主 ${h.name}`}
+                    onClick={() => setDelHostTarget(h)}
+                  >
+                    <span>删除</span>
+                  </button>
+                )}
               </div>
             ))}
           </div>
@@ -260,23 +386,19 @@ export function OverviewView({
         <section className="box">
           <div className="box-h">
             <h2>把新的 Agent 接进来</h2>
+            <span className="hint">按宿主自动生成连接片段</span>
           </div>
           <div className="box-b">
             <div className="od-stack" style={{ '--od-gap': '12px' } as CSSProperties}>
-              <ProtoSeg
-                label="选择要接入的工具"
-                items={
-                  [
-                    ['antigravity', 'Antigravity'],
-                    ['claude', 'Claude Code'],
-                    ['codex', 'Codex CLI'],
-                    ['opencode', 'OpenCode'],
-                  ] as const
-                }
-                value={configHostId}
-                onChange={setConfigHostId}
-              />
-              <p className="muted small">复制下面的内容，按注释提示操作即可。</p>
+              <div style={{ overflowX: 'auto' }}>
+                <ProtoSeg
+                  label="选择要接入的工具"
+                  items={state.hosts.map((h) => [h.id, h.name] as const)}
+                  value={selectedHostCfg?.id || configHostId}
+                  onChange={setConfigHostId}
+                />
+              </div>
+              <p className="muted small">复制下面的配置片段，粘贴到对应宿主客户端的 MCP 配置中即可。</p>
               <pre className="code">{selectedHostCfg?.configSnippet}</pre>
             </div>
           </div>
@@ -284,14 +406,100 @@ export function OverviewView({
             <button
               type="button"
               className="btn"
-              onClick={() => onCopy(selectedHostCfg?.configSnippet || '', '接入配置')}
+              onClick={() =>
+                onCopy(selectedHostCfg?.configSnippet || '', `${selectedHostCfg?.name || ''} 接入配置`)
+              }
             >
               <ProtoIcon name="copy" />
-              <span>复制</span>
+              <span>复制配置</span>
             </button>
           </div>
         </section>
       </div>
+
+      {/* Add Custom Host Modal */}
+      <ModalDialog
+        open={addHostOpen}
+        title="新增自定义 Agent 宿主"
+        confirmLabel="新增并生成配置"
+        busy={busyId === 'add-host'}
+        onClose={() => setAddHostOpen(false)}
+        onConfirm={handleAddHostSubmit}
+      >
+        <div className="field">
+          <label htmlFor="newHostName">
+            宿主名称 <span style={{ color: 'var(--bad)' }}>*</span>
+          </label>
+          <input
+            id="newHostName"
+            data-autofocus="true"
+            className="input"
+            value={hostName}
+            onChange={(e) => setHostName(e.target.value)}
+            placeholder="例如 Cursor、Windsurf、Cline"
+            aria-invalid={Boolean(hostErr)}
+          />
+          <div className="od-cluster" style={{ '--od-gap': '6px', marginTop: '4px' } as CSSProperties}>
+            <span className="small muted">快捷填充：</span>
+            {HOST_QUICK_PRESETS.map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className="chip-btn"
+                onClick={() => setHostName(preset)}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="grid-2" style={{ gap: '12px' }}>
+          <div className="field">
+            <label htmlFor="newHostTransport">接入方式</label>
+            <select
+              id="newHostTransport"
+              className="input"
+              value={hostTransport}
+              onChange={(e) => setHostTransport(e.target.value as 'stdio' | 'sse')}
+            >
+              <option value="stdio">stdio（本地子进程，推荐）</option>
+              <option value="sse">SSE（HTTP 远程流式）</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="newHostScope">默认权限范围</label>
+            <select
+              id="newHostScope"
+              className="input"
+              value={hostScope}
+              onChange={(e) => setHostScope(e.target.value as HostScope)}
+            >
+              <option value="audit">只读审计（默认安全）</option>
+              <option value="full">完整开发</option>
+              <option value="min">最小权限</option>
+            </select>
+          </div>
+        </div>
+        {hostErr && <span className="err">{hostErr}</span>}
+      </ModalDialog>
+
+      {/* Delete Custom Host Confirmation */}
+      <ModalDialog
+        open={Boolean(delHostTarget)}
+        title={`移除宿主「${delHostTarget?.name || ''}」？`}
+        confirmLabel="移除"
+        danger
+        onClose={() => setDelHostTarget(null)}
+        onConfirm={async () => {
+          if (!delHostTarget) return;
+          const target = delHostTarget;
+          await onDeleteHost(target.id, target.name);
+          if (configHostId === target.id) setConfigHostId('antigravity');
+          setDelHostTarget(null);
+        }}
+      >
+        <p>移除后，该宿主的权限策略和接入片段将从网关配置中删除。</p>
+      </ModalDialog>
 
       {/* Confirm disabling a security middleware */}
       <ModalDialog

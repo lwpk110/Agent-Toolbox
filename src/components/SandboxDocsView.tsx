@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import type { GatewayStateSnapshot } from '../types/toolbox';
 import type { DocDetail, DocMeta } from '../types/docs';
 import { api } from '../lib/api';
@@ -19,6 +19,40 @@ const STEPS = [
   { index: 8, title: '自动给密钥打码', method: 'postgres__query', desc: '返回内容里的密钥被替换成占位符' },
 ];
 
+const META_TOOLS: Array<{ method: string; label: string; defaultArgs: Record<string, unknown> }> = [
+  { method: 'tools/list', label: 'tools/list（列出常驻与元工具）', defaultArgs: {} },
+  {
+    method: 'toolbox__discover_capabilities',
+    label: 'toolbox__discover_capabilities（按需语义发现）',
+    defaultArgs: { query: '排查网关握手超时或审计 OWASP 漏洞' },
+  },
+  {
+    method: 'toolbox__inspect_schema',
+    label: 'toolbox__inspect_schema（按需拉取工具 Schema）',
+    defaultArgs: { toolName: 'github__create_issue' },
+  },
+  {
+    method: 'toolbox__load_skill',
+    label: 'toolbox__load_skill（动态挂载 Skill）',
+    defaultArgs: { skillId: 'security-owasp-auditor' },
+  },
+  {
+    method: 'toolbox__read_skill_file',
+    label: 'toolbox__read_skill_file（L3 按需读取目录内脚本/模板）',
+    defaultArgs: { skillId: 'security-owasp-auditor', filePath: 'scripts/scan-deps.sh' },
+  },
+  {
+    method: 'toolbox__unload_skill',
+    label: 'toolbox__unload_skill（卸载 Skill 释放 Token）',
+    defaultArgs: { skillId: 'security-owasp-auditor' },
+  },
+  {
+    method: 'toolbox__search_knowledge',
+    label: 'toolbox__search_knowledge（三位一体检索）',
+    defaultArgs: { query: '如何处理网关握手超时与连接池重连' },
+  },
+];
+
 const REPORT_SECTIONS: ReadonlyArray<readonly [string, string]> = [
   ['r1', '结论'],
   ['r2', '借鉴的 7 个开源项目'],
@@ -31,6 +65,11 @@ interface SandboxDocsViewProps {
   tab: 'sim' | 'report';
   onTabChange: (tab: 'sim' | 'report') => void;
   onRunStep: (host: string, stepIndex: number) => Promise<void>;
+  onRunCustomRpc: (
+    host: string,
+    method: string,
+    argumentsObj: Record<string, unknown>
+  ) => Promise<void>;
   onToast: (msg: string) => void;
 }
 
@@ -39,12 +78,21 @@ export function SandboxDocsView({
   tab,
   onTabChange,
   onRunStep,
+  onRunCustomRpc,
   onToast,
 }: SandboxDocsViewProps) {
   const [simHost, setSimHost] = useState<string>('Claude Code');
+  const [simMode, setSimMode] = useState<'guided' | 'custom'>('guided');
   const [activeStep, setActiveStep] = useState<number>(2);
   const [selectedLogIdx, setSelectedLogIdx] = useState<number>(0);
   const [running, setRunning] = useState<boolean>(false);
+
+  // Custom JSON-RPC builder state
+  const [customMethod, setCustomMethod] = useState<string>('toolbox__inspect_schema');
+  const [customArgsText, setCustomArgsText] = useState<string>(
+    JSON.stringify({ toolName: 'github__create_issue' }, null, 2)
+  );
+  const [customErr, setCustomErr] = useState<string>('');
 
   // Report & Extended Engineering Docs state
   const [docList, setDocList] = useState<DocMeta[]>([]);
@@ -56,6 +104,17 @@ export function SandboxDocsView({
     svg: string;
     title: string;
   } | null>(null);
+
+  const allRegisteredTools = useMemo(
+    () =>
+      state.servers.flatMap((s) =>
+        s.tools.map((t) => ({
+          serverName: s.name,
+          tool: t,
+        }))
+      ),
+    [state.servers]
+  );
 
   useEffect(() => {
     if (tab !== 'report') return;
@@ -73,7 +132,28 @@ export function SandboxDocsView({
       .finally(() => setDocLoading(false));
   }, [tab, activeDocSlug]);
 
-  const handleRun = async () => {
+  const handleSelectCustomMethod = (nextMethod: string) => {
+    setCustomMethod(nextMethod);
+    setCustomErr('');
+    const meta = META_TOOLS.find((m) => m.method === nextMethod);
+    if (meta) {
+      setCustomArgsText(JSON.stringify(meta.defaultArgs, null, 2));
+      return;
+    }
+    const found = allRegisteredTools.find((item) => item.tool.name === nextMethod);
+    if (found?.tool.inputSchema && typeof found.tool.inputSchema.properties === 'object') {
+      const props = found.tool.inputSchema.properties as Record<string, { type?: string }>;
+      const sample: Record<string, unknown> = {};
+      for (const [k, def] of Object.entries(props)) {
+        sample[k] = def?.type === 'number' || def?.type === 'integer' ? 10 : def?.type === 'boolean' ? false : `<${k}>`;
+      }
+      setCustomArgsText(JSON.stringify(sample, null, 2));
+      return;
+    }
+    setCustomArgsText('{}');
+  };
+
+  const handleRunGuided = async () => {
     setRunning(true);
     try {
       await onRunStep(simHost, activeStep);
@@ -81,6 +161,31 @@ export function SandboxDocsView({
       if (activeStep < STEPS.length - 1) {
         setActiveStep((prev) => prev + 1);
       }
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const handleRunCustom = async () => {
+    setCustomErr('');
+    let parsedArgs: Record<string, unknown> = {};
+    if (customArgsText.trim()) {
+      try {
+        const parsed = JSON.parse(customArgsText);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          setCustomErr('参数必须是 JSON 对象（例如 {"query":"..."}）。');
+          return;
+        }
+        parsedArgs = parsed as Record<string, unknown>;
+      } catch {
+        setCustomErr('JSON 参数格式有误，请检查引号与括号。');
+        return;
+      }
+    }
+    setRunning(true);
+    try {
+      await onRunCustomRpc(simHost, customMethod, parsedArgs);
+      setSelectedLogIdx(0);
     } finally {
       setRunning(false);
     }
@@ -125,7 +230,7 @@ export function SandboxDocsView({
             JSON-RPC 沙箱与报告
           </h1>
           <p className="lead">
-            阅读架构可行性报告，或一步步演练 AI 是怎样通过唯一 MCP 入口调用工具的。
+            阅读架构可行性报告，或通过 9 步引导与自定义 JSON-RPC 调试面板，实时验证 5 级安全中间件管道。
           </p>
         </div>
         {tab === 'report' && (
@@ -154,18 +259,28 @@ export function SandboxDocsView({
 
       {tab === 'sim' ? (
         <div className="grid-side">
-          {/* Left: Sandbox Steps */}
+          {/* Left: Guided Steps OR Custom JSON-RPC Builder */}
           <section className="box" id="x-main">
             <div className="box-h">
-              <h2>沙箱步骤</h2>
-              <span className="hint">
-                {state.auditLogs.length} / {STEPS.length} 已运行
-              </span>
+              <h2>RPC 调试台</h2>
+              <span className="hint">{state.auditLogs.length} 条日志</span>
             </div>
 
-            <div className="box-b">
+            <div className="box-b od-stack" style={{ '--od-gap': '12px' } as CSSProperties}>
+              <ProtoSeg
+                label="沙箱模式"
+                items={
+                  [
+                    ['guided', '9 步引导场景'],
+                    ['custom', '自定义 RPC'],
+                  ] as const
+                }
+                value={simMode}
+                onChange={setSimMode}
+              />
+
               <div className="field">
-                <label htmlFor="simHost">模拟哪个 Agent</label>
+                <label htmlFor="simHost">模拟哪个 Agent 宿主</label>
                 <select
                   className="input"
                   id="simHost"
@@ -174,49 +289,113 @@ export function SandboxDocsView({
                 >
                   {state.hosts.map((h) => (
                     <option key={h.id} value={h.name}>
-                      {h.name}
+                      {h.name} ({h.scope === 'full' ? '完整开发' : h.scope === 'audit' ? '只读审计' : '最小权限'})
                     </option>
                   ))}
                 </select>
               </div>
             </div>
 
-            <div className="steps">
-              {STEPS.map((s) => {
-                const done = state.auditLogs.some((l) => l.stepIndex === s.index);
-                const current = activeStep === s.index;
-                return (
-                  <button
-                    key={s.index}
-                    type="button"
-                    className={`step${done ? ' done' : ''}`}
-                    aria-current={current ? 'true' : undefined}
-                    onClick={() => setActiveStep(s.index)}
-                  >
-                    <span className="mk">{done ? '✓' : s.index + 1}</span>
-                    <span>
-                      <span className="tt" style={{ display: 'block' }}>
-                        {s.title}
-                      </span>
-                      <span className="dd" style={{ display: 'block' }}>
-                        {s.desc}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+            {simMode === 'guided' ? (
+              <>
+                <div className="steps">
+                  {STEPS.map((s) => {
+                    const done = state.auditLogs.some((l) => l.stepIndex === s.index);
+                    const current = activeStep === s.index;
+                    return (
+                      <button
+                        key={s.index}
+                        type="button"
+                        className={`step${done ? ' done' : ''}`}
+                        aria-current={current ? 'true' : undefined}
+                        onClick={() => setActiveStep(s.index)}
+                      >
+                        <span className="mk">{done ? '✓' : s.index + 1}</span>
+                        <span>
+                          <span className="tt" style={{ display: 'block' }}>
+                            {s.title}
+                          </span>
+                          <span className="dd" style={{ display: 'block' }}>
+                            {s.desc}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
 
-            <div className="box-f">
-              <button
-                type="button"
-                className="btn pri"
-                disabled={running}
-                onClick={handleRun}
-              >
-                <span>{running ? '运行中…' : `运行第 ${activeStep + 1} 步`}</span>
-              </button>
-            </div>
+                <div className="box-f">
+                  <button
+                    type="button"
+                    className="btn pri"
+                    disabled={running}
+                    onClick={handleRunGuided}
+                  >
+                    <span>{running ? '运行中…' : `运行第 ${activeStep + 1} 步`}</span>
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div
+                  className="box-b od-stack"
+                  style={{ '--od-gap': '12px', borderTop: '1px solid var(--line-row)' } as CSSProperties}
+                >
+                  <div className="field">
+                    <label htmlFor="customRpcMethod">调用方法 / 工具名</label>
+                    <select
+                      id="customRpcMethod"
+                      className="input mono"
+                      style={{ fontSize: '12px' }}
+                      value={customMethod}
+                      onChange={(e) => handleSelectCustomMethod(e.target.value)}
+                    >
+                      <optgroup label="网关元工具（Meta-Tools）">
+                        {META_TOOLS.map((m) => (
+                          <option key={m.method} value={m.method}>
+                            {m.label}
+                          </option>
+                        ))}
+                      </optgroup>
+                      <optgroup label="已接入下游 MCP 工具">
+                        {allRegisteredTools.map(({ serverName, tool }) => (
+                          <option key={tool.name} value={tool.name}>
+                            {tool.name} ({serverName})
+                          </option>
+                        ))}
+                      </optgroup>
+                    </select>
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="customRpcArgs">JSON 参数 (arguments)</label>
+                    <textarea
+                      id="customRpcArgs"
+                      rows={8}
+                      className="input mono"
+                      style={{ fontSize: '12px' }}
+                      value={customArgsText}
+                      onChange={(e) => setCustomArgsText(e.target.value)}
+                    />
+                    <span className="help">
+                      请求将实时穿过当前开启的 5 级安全中间件（宿主权限、隔离、HITL、脱敏与预算）。
+                    </span>
+                    {customErr && <span className="err">{customErr}</span>}
+                  </div>
+                </div>
+
+                <div className="box-f">
+                  <button
+                    type="button"
+                    className="btn pri"
+                    disabled={running}
+                    onClick={handleRunCustom}
+                  >
+                    <span>{running ? '发送中…' : '发送自定义 JSON-RPC'}</span>
+                  </button>
+                </div>
+              </>
+            )}
           </section>
 
           {/* Right: Gateway Response + Run History */}
@@ -224,6 +403,7 @@ export function SandboxDocsView({
             <section className="box">
               <div className="box-h">
                 <h2>网关返回的内容</h2>
+                {selectedLog && <span className="hint mono">{selectedLog.method}</span>}
               </div>
               <div className="box-b">
                 {selectedLog ? (
@@ -244,8 +424,8 @@ export function SandboxDocsView({
                 ) : (
                   <div className="empty">
                     <ProtoIcon name="terminal" />
-                    <b>还没有运行任何步骤</b>
-                    <span>在左侧选一步，点「运行」，这里会显示网关返回的内容。</span>
+                    <b>还没有运行任何请求</b>
+                    <span>在左侧运行引导步骤或发送自定义 JSON-RPC，这里会显示网关返回。</span>
                   </div>
                 )}
               </div>
@@ -318,7 +498,7 @@ export function SandboxDocsView({
           </div>
         </div>
       ) : (
-        /* Feasibility Report (1:1 prototype default) + Extended Engineering Docs & Mermaid */
+        /* Feasibility Report + Extended Engineering Docs & Mermaid */
         <div className="report">
           <nav className="toc" aria-label="报告目录">
             {activeDocSlug === 'summary' ? (
@@ -372,7 +552,7 @@ export function SandboxDocsView({
               <h2 id="r1">结论：高度可行（A+）</h2>
               <p>
                 只要在本机运行一个常驻网关，对外暴露唯一的 MCP 入口，Antigravity、Claude Code、Codex
-                CLI、OpenCode 四个工具都不需要改源码，加一行配置就能用上所有外部工具、Skill、知识库和共享记忆，并通过
+                CLI、OpenCode 以及任意自定义宿主都不需要改源码，加一行配置就能用上所有外部工具、目录包 Skill、知识库和共享记忆，并通过
                 GitHub 在多台电脑间同步。
               </p>
 
@@ -385,7 +565,7 @@ export function SandboxDocsView({
                   <b>1mcp</b>：发现 → 检查 → 调用的三段式流程
                 </li>
                 <li>
-                  <b>Skills-ContextManager / skills-manager</b>：双层 Skill，告别软链接
+                  <b>Skills-ContextManager / skills-manager</b>：双层目录包 Skill，告别软链接
                 </li>
                 <li>
                   <b>MCPHub</b>：用向量语义推荐工具
@@ -401,19 +581,19 @@ export function SandboxDocsView({
                 </li>
               </ul>
 
-              <h2 id="r3">四个 Agent 都能接入</h2>
+              <h2 id="r3">多宿主兼容接入</h2>
               <p>
                 Antigravity、Claude Code、OpenCode 原生支持工具列表实时刷新，评级 A+。Codex CLI
-                通过三段式元工具兜底，评级 A。
+                与自定义客户端通过元工具协议兜底，评级 A。
               </p>
 
               <h2 id="r4">四个难点与解法</h2>
               <h3>1. 进程太多、数据库写锁冲突</h3>
               <p>全局只跑一个守护进程，各工具通过轻量转发器共享连接池。</p>
               <h3>2. 工具太多导致 Token 爆炸</h3>
-              <p>默认只暴露常驻工具和 5 个元工具（约 1,580 Token），其余按需加载。</p>
+              <p>默认只暴露常驻工具和元工具（约 1,580 Token），其余按需加载。</p>
               <h3>3. 第三方工具被静默篡改</h3>
-              <p>用 SHA-256 指纹锁比对，发现变化立即隔离，返回内容自动脱敏。</p>
+              <p>用 SHA-256 指纹锁比对描述与参数 Schema，发现变化立即隔离，返回内容自动脱敏。</p>
               <h3>4. 同步时泄露密钥、索引文件过大</h3>
               <p>GitHub 只存配置和原文，密钥用 vault:// 引用，向量索引在本机重建。</p>
             </article>
