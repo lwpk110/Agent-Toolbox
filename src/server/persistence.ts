@@ -6,19 +6,31 @@ export const PERSISTENCE_SCHEMA_VERSION = 1;
 
 export type PersistedGatewayState = Record<string, unknown>;
 
+const persistences = new Set<GatewayPersistence>();
+let signalHandlersRegistered = false;
+
+function flushAndExit(): void {
+  for (const persistence of persistences) persistence.flushSync();
+  process.exit(0);
+}
+
+function registerSignalHandlers(): void {
+  if (signalHandlersRegistered) return;
+  signalHandlersRegistered = true;
+  process.on('SIGINT', flushAndExit);
+  process.on('SIGTERM', flushAndExit);
+}
+
 export class GatewayPersistence {
   readonly dataFile: string;
   readonly vaultKey: Buffer;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private pendingState: PersistedGatewayState | undefined;
-  private readonly flushOnExit: () => void;
-
   constructor(dataFile = process.env.TOOLBOX_DATA_FILE || './data/gateway-state.json') {
     this.dataFile = path.resolve(dataFile);
     this.vaultKey = this.loadVaultKey();
-    this.flushOnExit = () => this.flushSync();
-    process.on('SIGINT', this.flushOnExit);
-    process.on('SIGTERM', this.flushOnExit);
+    persistences.add(this);
+    registerSignalHandlers();
   }
 
   load(): PersistedGatewayState | undefined {
@@ -36,6 +48,16 @@ export class GatewayPersistence {
       }
       return record;
     } catch (error) {
+      if (error instanceof SyntaxError) {
+        const corruptFile = `${this.dataFile}.corrupt-${Date.now()}`;
+        try {
+          fs.renameSync(this.dataFile, corruptFile);
+          console.warn(`[gateway-persistence] Invalid JSON moved to ${corruptFile}; using seed data`);
+        } catch (renameError) {
+          throw new Error(`[gateway-persistence] Could not archive invalid state ${this.dataFile}; refusing to overwrite it: ${String(renameError)}`);
+        }
+        return undefined;
+      }
       console.warn(`[gateway-persistence] Could not read ${this.dataFile}; using seed data: ${String(error)}`);
       return undefined;
     }
@@ -78,23 +100,24 @@ export class GatewayPersistence {
     if (configured) return crypto.createHash('sha256').update(configured).digest();
 
     const keyFile = path.join(path.dirname(this.dataFile), '.vault-key');
+    let key: Buffer | undefined;
     try {
-      const key = fs.readFileSync(keyFile);
-      if (key.length === 32) {
-        fs.chmodSync(keyFile, 0o600);
-        return key;
-      }
-      console.warn(`[gateway-persistence] Invalid vault key at ${keyFile}; generating a replacement`);
+      key = fs.readFileSync(keyFile);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.warn(`[gateway-persistence] Could not read vault key at ${keyFile}: ${String(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error(`[gateway-persistence] Could not read vault key at ${keyFile}: ${String(error)}`);
+    }
+    if (key) {
+      if (key.length !== 32) {
+        throw new Error(`[gateway-persistence] Invalid vault key at ${keyFile}: expected 32 bytes, found ${key.length}; refusing to replace it`);
       }
+      fs.chmodSync(keyFile, 0o600);
+      return key;
     }
 
-    const key = crypto.randomBytes(32);
+    const generatedKey = crypto.randomBytes(32);
     fs.mkdirSync(path.dirname(keyFile), { recursive: true });
-    fs.writeFileSync(keyFile, key, { mode: 0o600, flag: 'wx' });
+    fs.writeFileSync(keyFile, generatedKey, { mode: 0o600, flag: 'wx' });
     fs.chmodSync(keyFile, 0o600);
-    return key;
+    return generatedKey;
   }
 }

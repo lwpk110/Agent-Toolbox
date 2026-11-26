@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -50,6 +51,7 @@ describe('GatewayStore persistence', () => {
     const dataFile = makeDataFile();
     fs.writeFileSync(dataFile, '{broken');
     expect(() => new GatewayStore({ dataFile })).not.toThrow();
+    expect(fs.readdirSync(path.dirname(dataFile)).some((name) => /^gateway-state\.json\.corrupt-\d+$/.test(name))).toBe(true);
     await waitForWrite();
     expect(new GatewayStore({ dataFile }).getSnapshot().hosts.length).toBeGreaterThan(0);
 
@@ -57,6 +59,48 @@ describe('GatewayStore persistence', () => {
     expect(() => new GatewayStore({ dataFile })).not.toThrow();
     await waitForWrite();
     expect(new GatewayStore({ dataFile }).getSnapshot().hosts.length).toBeGreaterThan(0);
+  });
+
+  test('rejects an invalid vault key with a clear error', () => {
+    const dataFile = makeDataFile();
+    const keyFile = path.join(path.dirname(dataFile), '.vault-key');
+    fs.writeFileSync(keyFile, Buffer.from('short'));
+
+    let message = '';
+    try {
+      new GatewayStore({ dataFile });
+    } catch (error) {
+      message = String(error);
+    }
+
+    expect(message).toContain(`Invalid vault key at ${keyFile}: expected 32 bytes, found 5`);
+    expect(fs.readFileSync(keyFile, 'utf8')).toBe('short');
+  });
+
+  test('flushes and exits when receiving SIGTERM', async () => {
+    const dataFile = makeDataFile();
+    const moduleUrl = new URL('../src/server/persistence.ts', import.meta.url).href;
+    const script = `import { GatewayPersistence } from ${JSON.stringify(moduleUrl)}; const p = new GatewayPersistence(${JSON.stringify(dataFile)}); p.schedule({ marker: 'flushed' }); setInterval(() => {}, 10000); setImmediate(() => process.kill(process.pid, 'SIGTERM'));`;
+
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('node', ['--import', 'tsx/esm', '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => { stderr += chunk; });
+      child.on('error', reject);
+      child.on('exit', (code, signal) => {
+        if (code !== 0 || signal !== null) {
+          reject(new Error(`Child did not exit cleanly (code=${code}, signal=${signal}): ${stderr}`));
+          return;
+        }
+        try {
+          const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8')) as { marker?: string };
+          expect(saved.marker).toBe('flushed');
+          resolve();
+        } catch (error) {
+          reject(new Error(`${String(error)}; child stderr: ${stderr}`));
+        }
+      });
+    });
   });
 
   test('atomically replaces state without leaving temporary files', async () => {

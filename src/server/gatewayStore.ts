@@ -3936,4 +3936,12 @@ export class GatewayStore {
   }
 }
 
-export const gatewayStore = new GatewayStore();
+let defaultGatewayStore: GatewayStore | undefined;
+
+export const gatewayStore: GatewayStore = new Proxy({} as GatewayStore, {
+  get(_target, property) {
+    defaultGatewayStore ??= new GatewayStore();
+    const value = Reflect.get(defaultGatewayStore, property, defaultGatewayStore);
+    return typeof value === 'function' ? value.bind(defaultGatewayStore) : value;
+  },
+});
