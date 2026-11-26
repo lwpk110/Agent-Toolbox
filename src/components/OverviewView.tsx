@@ -1,11 +1,14 @@
-import { useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import type {
+  CodexIntegrationStatus,
+  CodexTargetPlatform,
   GatewayStateSnapshot,
   HostProfile,
   HostScope,
   MiddlewareId,
   MiddlewareRule,
 } from '../types/toolbox';
+import { api } from '../lib/api';
 import { ProtoIcon } from './ProtoIcon';
 import { ProtoSeg, ProtoStatus, ProtoSwitch, ProtoTip } from './ProtoPrimitives';
 import { ModalDialog } from './ModalDialog';
@@ -25,6 +28,8 @@ interface OverviewViewProps {
     transport?: 'stdio' | 'sse';
   }) => Promise<string | undefined>;
   onDeleteHost: (hostId: string, hostName: string) => Promise<void>;
+  onApplySnapshot: (next: GatewayStateSnapshot) => void;
+  onToast: (msg: string) => void;
   onCopy: (text: string, label: string) => void;
 }
 
@@ -39,9 +44,16 @@ export function OverviewView({
   onChangeHostScope,
   onAddHost,
   onDeleteHost,
+  onApplySnapshot,
+  onToast,
   onCopy,
 }: OverviewViewProps) {
-  const [configHostId, setConfigHostId] = useState<string>('antigravity');
+  const [configHostId, setConfigHostId] = useState<string>('codex');
+  const [codexStatus, setCodexStatus] = useState<CodexIntegrationStatus | null>(null);
+  const [codexTransport, setCodexTransport] = useState<'stdio' | 'http'>('stdio');
+  const [codexPlatform, setCodexPlatform] = useState<CodexTargetPlatform | undefined>(undefined);
+  const [codexWslDistro, setCodexWslDistro] = useState<string | undefined>(undefined);
+  const [codexBusy, setCodexBusy] = useState<boolean>(false);
   const [confirmMw, setConfirmMw] = useState<MiddlewareRule | null>(null);
   const [infoTip, setInfoTip] = useState<{ title: string; body: string } | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -57,6 +69,85 @@ export function OverviewView({
   const quarantinedServers = state.servers.filter((s) => s.state === 'quarantined');
   const missingKeys = state.vault.filter((v) => !v.configured);
   const selectedHostCfg = state.hosts.find((h) => h.id === configHostId) || state.hosts[0];
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getCodexStatus({ targetPlatform: codexPlatform, wslDistro: codexWslDistro })
+      .then((res) => {
+        if (active) {
+          setCodexStatus(res);
+          if (!codexPlatform) {
+            setCodexPlatform(res.detectedPlatform);
+          }
+          if (res.wslDistro && !codexWslDistro) {
+            setCodexWslDistro(res.wslDistro);
+          }
+          if (res.registeredTransport) {
+            setCodexTransport(res.registeredTransport);
+          }
+        }
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [state.servers.length, codexPlatform, codexWslDistro]);
+
+  const handleInstallCodex = async () => {
+    setCodexBusy(true);
+    try {
+      const next = await api.installCodex({
+        transport: codexTransport,
+        targetPlatform: codexPlatform,
+        wslDistro: codexWslDistro,
+      });
+      setCodexStatus(next);
+      onToast(`已将 Agent-Toolbox (${next.platformLabel} · ${codexTransport}) 写入 ${next.configPath}`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '写入 Codex 配置失败');
+    } finally {
+      setCodexBusy(false);
+    }
+  };
+
+  const handleUninstallCodex = async () => {
+    setCodexBusy(true);
+    try {
+      const next = await api.uninstallCodex({
+        targetPlatform: codexPlatform,
+        wslDistro: codexWslDistro,
+      });
+      setCodexStatus(next);
+      onToast(`已从 ${next.platformLabel} Codex CLI 移除 Agent-Toolbox 配置`);
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '移除 Codex 配置失败');
+    } finally {
+      setCodexBusy(false);
+    }
+  };
+
+  const handleImportCodexServers = async () => {
+    setCodexBusy(true);
+    try {
+      const res = await api.importCodexServers({
+        defaultMode: 'lazy',
+        targetPlatform: codexPlatform,
+        wslDistro: codexWslDistro,
+      });
+      onApplySnapshot(res.data);
+      setCodexStatus(res.codexStatus);
+      onToast(
+        res.addedIds.length
+          ? `已从 ${res.codexStatus.platformLabel} Codex 导入 ${res.addedIds.length} 个 MCP Server（默认 Lazy 模式）`
+          : 'Codex 中的 MCP Server 均已导入或无新增'
+      );
+    } catch (err) {
+      onToast(err instanceof Error ? err.message : '导入 Codex MCP 失败');
+    } finally {
+      setCodexBusy(false);
+    }
+  };
 
   const handleMiddlewareClick = async (rule: MiddlewareRule) => {
     if (rule.enabled && rule.id !== 'budget') {
@@ -398,21 +489,165 @@ export function OverviewView({
                   onChange={setConfigHostId}
                 />
               </div>
-              <p className="muted small">复制下面的配置片段，粘贴到对应宿主客户端的 MCP 配置中即可。</p>
-              <pre className="code">{selectedHostCfg?.configSnippet}</pre>
+              {selectedHostCfg?.id === 'codex' && codexStatus ? (
+                <div className="od-stack" style={{ '--od-gap': '10px' } as CSSProperties}>
+                  <div className="od-row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                    <div style={{ overflowX: 'auto' }}>
+                      <ProtoSeg
+                        label="目标运行平台"
+                        items={
+                          [
+                            ['windows', 'Windows'],
+                            ['windows-wsl', 'Windows WSL'],
+                            ['linux', 'Linux'],
+                            ['macos', 'macOS'],
+                          ] as const
+                        }
+                        value={codexPlatform || codexStatus.targetPlatform}
+                        onChange={(nextPlatform) => {
+                          setCodexPlatform(nextPlatform);
+                          if (nextPlatform !== 'windows-wsl') {
+                            setCodexWslDistro(undefined);
+                          }
+                        }}
+                      />
+                    </div>
+                    <ProtoSeg
+                      label="Codex 接入传输模式"
+                      items={
+                        [
+                          ['stdio', 'stdio 自动守护'],
+                          ['http', 'HTTP Streamable'],
+                        ] as const
+                      }
+                      value={codexTransport}
+                      onChange={setCodexTransport}
+                    />
+                  </div>
+                  <div className="od-row" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                    <div className="od-row" style={{ '--od-gap': '8px' } as CSSProperties}>
+                      <ProtoStatus
+                        kind={codexStatus.registeredInCodex ? 'ok' : codexStatus.canDirectWrite ? 'warn' : 'off'}
+                        text={
+                          codexStatus.registeredInCodex
+                            ? `已写入 (${codexStatus.registeredTransport})`
+                            : codexStatus.canDirectWrite
+                            ? '尚未写入 config.toml'
+                            : '仅预览配置'
+                        }
+                      />
+                      <span className="small muted mono">
+                        {codexStatus.targetPlatform === codexStatus.detectedPlatform ? '当前环境 · ' : ''}
+                        {codexStatus.cliInstalled ? codexStatus.cliVersion : '未检测到 codex CLI'}
+                      </span>
+                    </div>
+                    {codexStatus.targetPlatform === 'windows-wsl' && codexStatus.wslDistros.length > 0 && (
+                      <select
+                        aria-label="选择 WSL 发行版"
+                        className="input mono"
+                        style={{ height: '26px', fontSize: '12px', padding: '0 8px', width: 'auto' }}
+                        value={codexWslDistro || codexStatus.wslDistro || codexStatus.wslDistros[0]}
+                        onChange={(e) => setCodexWslDistro(e.target.value)}
+                      >
+                        {codexStatus.wslDistros.map((d) => (
+                          <option key={d} value={d}>
+                            WSL: {d}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                  <p className="muted small">
+                    配置文件：<span className="mono">{codexStatus.configPath}</span>
+                    {selectedHostCfg.lastSeenAt
+                      ? ` · 最近心跳 ${new Date(selectedHostCfg.lastSeenAt).toLocaleTimeString()}`
+                      : ''}
+                  </p>
+                  {codexStatus.writeNote && (
+                    <p className="small" style={{ color: 'var(--warn)' }}>
+                      {codexStatus.writeNote}
+                    </p>
+                  )}
+                  <pre className="code">
+                    {codexTransport === 'http'
+                      ? codexStatus.recommendedTomlHttp
+                      : codexStatus.recommendedTomlStdio}
+                  </pre>
+                  {codexStatus.discoveredServers.filter((s) => !s.isAgentToolbox).length > 0 && (
+                    <div className="od-stack" style={{ '--od-gap': '6px', paddingTop: '4px' } as CSSProperties}>
+                      <div className="od-row" style={{ justifyContent: 'space-between' }}>
+                        <span className="small muted">
+                          检测到 {codexStatus.discoveredServers.filter((s) => !s.isAgentToolbox).length} 个 Codex 已有 MCP 服务：
+                          {codexStatus.discoveredServers
+                            .filter((s) => !s.isAgentToolbox)
+                            .map((s) => s.name)
+                            .join('、')}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn sm"
+                          disabled={codexBusy}
+                          onClick={handleImportCodexServers}
+                        >
+                          <span>导入到 Lazy 网关</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <p className="muted small">复制下面的配置片段，粘贴到对应宿主客户端的 MCP 配置中即可。</p>
+                  <pre className="code">{selectedHostCfg?.configSnippet}</pre>
+                </>
+              )}
             </div>
           </div>
-          <div className="box-f">
+          <div className="box-f" style={{ justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
             <button
               type="button"
               className="btn"
-              onClick={() =>
-                onCopy(selectedHostCfg?.configSnippet || '', `${selectedHostCfg?.name || ''} 接入配置`)
-              }
+              onClick={() => {
+                const snippet =
+                  selectedHostCfg?.id === 'codex' && codexStatus
+                    ? codexTransport === 'http'
+                      ? codexStatus.recommendedTomlHttp
+                      : codexStatus.recommendedTomlStdio
+                    : selectedHostCfg?.configSnippet || '';
+                onCopy(snippet, `${selectedHostCfg?.name || ''} 接入配置`);
+              }}
             >
               <ProtoIcon name="copy" />
               <span>复制配置</span>
             </button>
+            {selectedHostCfg?.id === 'codex' && codexStatus && (
+              <div className="od-row" style={{ '--od-gap': '8px' } as CSSProperties}>
+                {codexStatus.registeredInCodex && codexStatus.canDirectWrite && (
+                  <button
+                    type="button"
+                    className="btn danger"
+                    disabled={codexBusy}
+                    onClick={handleUninstallCodex}
+                  >
+                    <span>移除接入</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn pri"
+                  disabled={codexBusy || !codexStatus.canDirectWrite}
+                  onClick={handleInstallCodex}
+                >
+                  <span>
+                    {!codexStatus.canDirectWrite
+                      ? `请复制配置到 ${codexStatus.platformLabel}`
+                      : codexStatus.registeredInCodex
+                      ? `更新 ${codexStatus.platformLabel} 配置`
+                      : `一键写入 ${codexStatus.platformLabel} 配置`}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
         </section>
       </div>

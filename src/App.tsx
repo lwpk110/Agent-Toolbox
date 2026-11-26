@@ -122,6 +122,9 @@ export default function App() {
       'server.deleted',
       'host.added',
       'host.deleted',
+      'host.scope_changed',
+      'host.heartbeat',
+      'rpc.executed',
       'skill.mounted',
       'skill.unmounted',
       'skill.created',
@@ -585,13 +588,13 @@ export default function App() {
               stdio://agent-toolbox
             </div>
             <div className="side-note mono" style={{ wordBreak: 'break-all' }}>
-              http://127.0.0.1:3000/api/mcp/sse
+              http://127.0.0.1:3000/api/mcp
             </div>
             <button
               type="button"
               className="side-link"
               onClick={() =>
-                handleCopy('stdio://agent-toolbox\nhttp://127.0.0.1:3000/api/mcp/sse', '入口地址')
+                handleCopy('stdio://agent-toolbox\nhttp://127.0.0.1:3000/api/mcp', '入口地址')
               }
             >
               <ProtoIcon name="copy" />
@@ -627,6 +630,8 @@ export default function App() {
               onChangeHostScope={handleChangeHostScope}
               onAddHost={handleAddHost}
               onDeleteHost={handleDeleteHost}
+              onApplySnapshot={setState}
+              onToast={showToast}
               onCopy={handleCopy}
             />
           ) : view === 'gateway' ? (

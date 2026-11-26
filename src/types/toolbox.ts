@@ -12,6 +12,8 @@ export interface HostProfile {
   scope: HostScope;
   configSnippet: string;
   custom?: boolean;
+  lastSeenAt?: string;
+  activeSessions?: number;
 }
 
 export interface MiddlewareRule {
@@ -43,6 +45,7 @@ export interface McpTool {
   fingerprint: string;
   lockedFingerprint: string;
   readOnly?: boolean;
+  remoteName?: string;
   inputSchema?: Record<string, unknown>;
   annotations?: McpToolAnnotations;
 }
@@ -92,6 +95,7 @@ export interface McpServer {
   state: ServerState;
   fingerprint: string;
   secretRef?: string;
+  origin?: 'demo' | 'real';
   tools: McpTool[];
   resources: McpResource[];
   prompts: McpPrompt[];
@@ -342,4 +346,42 @@ export interface GatewayStateSnapshot {
   preflight: SyncPreflightResult;
   pendingApprovals: HitlApproval[];
   auditLogs: AuditRpcEvent[];
+}
+
+export type CodexTargetPlatform = 'windows' | 'windows-wsl' | 'linux' | 'macos';
+
+export interface CodexMcpServerEntry {
+  name: string;
+  transport: 'stdio' | 'http';
+  command?: string;
+  args?: string[];
+  url?: string;
+  envKeys: string[];
+  enabled: boolean;
+  isAgentToolbox: boolean;
+  alreadyImportedToGateway: boolean;
+}
+
+export interface CodexIntegrationStatus {
+  detectedPlatform: CodexTargetPlatform;
+  targetPlatform: CodexTargetPlatform;
+  platformLabel: string;
+  wslDistro: string | null;
+  wslDistros: string[];
+  canDirectWrite: boolean;
+  writeNote?: string;
+  cliInstalled: boolean;
+  cliVersion: string | null;
+  codexHome: string;
+  configPath: string;
+  configExists: boolean;
+  agentsMdExists: boolean;
+  registeredInCodex: boolean;
+  registeredTransport: 'stdio' | 'http' | null;
+  registeredCommandOrUrl: string | null;
+  discoveredServers: CodexMcpServerEntry[];
+  recommendedTomlStdio: string;
+  recommendedTomlHttp: string;
+  recommendedCliStdio: string;
+  recommendedCliHttp: string;
 }

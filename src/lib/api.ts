@@ -1,4 +1,6 @@
 import type {
+  CodexIntegrationStatus,
+  CodexTargetPlatform,
   ExposureMode,
   GatewayStateSnapshot,
   HostScope,
@@ -315,4 +317,47 @@ export const api = {
   getDocsList: () => requestJson<{ docs: DocMeta[] }>('/api/docs').then((r) => r.docs),
 
   getDocDetail: (slug: string) => requestJson<DocDetail>(`/api/docs/${encodeURIComponent(slug)}`),
+
+  getCodexStatus: (params?: { targetPlatform?: CodexTargetPlatform; wslDistro?: string }) => {
+    const qs = new URLSearchParams();
+    if (params?.targetPlatform) qs.set('targetPlatform', params.targetPlatform);
+    if (params?.wslDistro) qs.set('wslDistro', params.wslDistro);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return requestJson<{ ok: true; data: CodexIntegrationStatus }>(`/api/v1/hosts/codex/status${suffix}`).then(
+      (r) => r.data
+    );
+  },
+
+  installCodex: (payload?: {
+    transport?: 'stdio' | 'http';
+    targetPlatform?: CodexTargetPlatform;
+    wslDistro?: string;
+  }) =>
+    requestJson<{ ok: true; data: CodexIntegrationStatus }>('/api/v1/hosts/codex/install', {
+      method: 'POST',
+      body: JSON.stringify(payload || { transport: 'stdio' }),
+    }).then((r) => r.data),
+
+  uninstallCodex: (payload?: { targetPlatform?: CodexTargetPlatform; wslDistro?: string }) =>
+    requestJson<{ ok: true; data: CodexIntegrationStatus }>('/api/v1/hosts/codex/uninstall', {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }).then((r) => r.data),
+
+  importCodexServers: (payload?: {
+    names?: string[];
+    defaultMode?: ExposureMode;
+    targetPlatform?: CodexTargetPlatform;
+    wslDistro?: string;
+  }) =>
+    requestJson<{
+      ok: true;
+      addedIds: string[];
+      skippedIds: string[];
+      codexStatus: CodexIntegrationStatus;
+      data: GatewayStateSnapshot;
+    }>('/api/v1/hosts/codex/import-servers', {
+      method: 'POST',
+      body: JSON.stringify(payload || {}),
+    }),
 };

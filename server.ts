@@ -8,6 +8,7 @@ import {
   walkWorkspaceDocs,
 } from './src/server/workspaceDocs';
 import type {
+  CodexTargetPlatform,
   ExposureMode,
   HostScope,
   MiddlewareId,
@@ -21,6 +22,16 @@ import {
   normalizeSkillFilePath,
   parseSkillFrontmatter,
 } from './src/server/gatewayStore';
+import { dispatchMcpJsonRpc } from './src/server/mcpProtocol';
+import { downstreamPool } from './src/server/downstreamPool';
+import { removeDaemonLockIfOwner, writeDaemonLock } from './src/server/daemonLock';
+import {
+  getCodexIntegrationStatus,
+  installAgentToolboxToCodex,
+  normalizeTargetPlatform,
+  readRawCodexServersForImport,
+  uninstallAgentToolboxFromCodex,
+} from './src/server/adapters/codex';
 
 if (process.argv.includes('--production')) {
   process.env.NODE_ENV = 'production';
@@ -253,6 +264,141 @@ app.delete('/api/v1/hosts/:id', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
+app.get('/api/v1/hosts/codex/status', (req, res) => {
+  const targetPlatform: CodexTargetPlatform | undefined =
+    typeof req.query?.targetPlatform === 'string'
+      ? normalizeTargetPlatform(req.query.targetPlatform)
+      : undefined;
+  const wslDistro = typeof req.query?.wslDistro === 'string' && req.query.wslDistro.trim()
+    ? req.query.wslDistro.trim()
+    : undefined;
+  const serverIds = gatewayStore.getSnapshot().servers.map((s) => s.id);
+  const status = getCodexIntegrationStatus({
+    port: PORT,
+    gatewayServerIds: serverIds,
+    workspaceRoot: ROOT_DIR,
+    targetPlatform,
+    wslDistro,
+  });
+  sendOk(res, status);
+});
+
+app.post('/api/v1/hosts/codex/install', (req, res) => {
+  const transport = req.body?.transport === 'http' ? 'http' : 'stdio';
+  const targetPlatform =
+    typeof req.body?.targetPlatform === 'string'
+      ? normalizeTargetPlatform(req.body.targetPlatform)
+      : undefined;
+  const wslDistro =
+    typeof req.body?.wslDistro === 'string' && req.body.wslDistro.trim()
+      ? req.body.wslDistro.trim()
+      : undefined;
+
+  const installResult = installAgentToolboxToCodex({
+    transport,
+    port: PORT,
+    workspaceRoot: ROOT_DIR,
+    targetPlatform,
+    wslDistro,
+  });
+  if (!installResult.ok) {
+    sendErr(res, 400, 'CODEX_INSTALL_FAILED', installResult.error || '写入 Codex 配置失败。');
+    return;
+  }
+  const serverIds = gatewayStore.getSnapshot().servers.map((s) => s.id);
+  const status = getCodexIntegrationStatus({
+    port: PORT,
+    gatewayServerIds: serverIds,
+    workspaceRoot: ROOT_DIR,
+    targetPlatform,
+    wslDistro,
+  });
+  sendOk(res, status, { installResult });
+});
+
+app.post('/api/v1/hosts/codex/uninstall', (req, res) => {
+  const targetPlatform =
+    typeof req.body?.targetPlatform === 'string'
+      ? normalizeTargetPlatform(req.body.targetPlatform)
+      : undefined;
+  const wslDistro =
+    typeof req.body?.wslDistro === 'string' && req.body.wslDistro.trim()
+      ? req.body.wslDistro.trim()
+      : undefined;
+
+  const uninstallResult = uninstallAgentToolboxFromCodex({ targetPlatform, wslDistro });
+  if (!uninstallResult.ok) {
+    sendErr(res, 400, 'CODEX_UNINSTALL_FAILED', uninstallResult.error || '移除 Codex 配置失败。');
+    return;
+  }
+  const serverIds = gatewayStore.getSnapshot().servers.map((s) => s.id);
+  const status = getCodexIntegrationStatus({
+    port: PORT,
+    gatewayServerIds: serverIds,
+    workspaceRoot: ROOT_DIR,
+    targetPlatform,
+    wslDistro,
+  });
+  sendOk(res, status, { uninstallResult });
+});
+
+app.post('/api/v1/hosts/codex/import-servers', async (req, res) => {
+  const namesFilter = Array.isArray(req.body?.names)
+    ? new Set((req.body.names as unknown[]).map((n) => String(n)))
+    : null;
+  const defaultMode: ExposureMode = req.body?.defaultMode === 'pinned' ? 'pinned' : 'lazy';
+  const targetPlatform =
+    typeof req.body?.targetPlatform === 'string'
+      ? normalizeTargetPlatform(req.body.targetPlatform)
+      : undefined;
+  const wslDistro =
+    typeof req.body?.wslDistro === 'string' && req.body.wslDistro.trim()
+      ? req.body.wslDistro.trim()
+      : undefined;
+
+  const candidates = readRawCodexServersForImport({ targetPlatform, wslDistro });
+  const addedIds: string[] = [];
+  const skippedIds: string[] = [];
+
+  for (const srv of candidates) {
+    if (namesFilter && !namesFilter.has(srv.name)) continue;
+    const cleanId = srv.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    if (!cleanId) {
+      skippedIds.push(srv.name);
+      continue;
+    }
+    const created = gatewayStore.addServer({
+      name: cleanId,
+      protocol: srv.transport === 'http' ? 'http' : 'stdio',
+      commandOrUrl: srv.url || srv.command || '',
+      args: srv.args,
+      env: Object.keys(srv.env).length ? srv.env : undefined,
+      headers: Object.keys(srv.httpHeaders).length ? srv.httpHeaders : undefined,
+      defaultMode,
+      initialToolDesc: `从 Codex config.toml 导入的 ${srv.name} 服务`,
+    });
+    if (created.server) {
+      addedIds.push(created.server.id);
+    } else {
+      skippedIds.push(srv.name);
+    }
+  }
+
+  const serverIds = gatewayStore.getSnapshot().servers.map((s) => s.id);
+  const codexStatus = getCodexIntegrationStatus({
+    port: PORT,
+    gatewayServerIds: serverIds,
+    workspaceRoot: ROOT_DIR,
+    targetPlatform,
+    wslDistro,
+  });
+  sendOk(res, gatewayStore.getSnapshot(), { addedIds, skippedIds, codexStatus });
+});
+
 app.patch('/api/v1/hosts/:id/scope', (req, res) => {
   const scope = req.body?.scope as HostScope;
   if (!['full', 'audit', 'min'].includes(scope)) {
@@ -382,13 +528,17 @@ app.patch('/api/v1/servers/:id/tools-mode', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
-app.post('/api/v1/servers/:id/ping', (req, res) => {
-  const pinged = gatewayStore.pingServer(req.params.id);
-  if (!pinged) {
-    sendErr(res, 404, 'SERVER_NOT_FOUND', '未找到指定的 MCP Server。');
+app.post('/api/v1/servers/:id/ping', async (req, res) => {
+  const result = await gatewayStore.syncRealServer(req.params.id);
+  if (!result.server) {
+    sendErr(res, 404, 'SERVER_NOT_FOUND', result.error || '未找到指定的 MCP Server。');
     return;
   }
-  sendOk(res, gatewayStore.getSnapshot());
+  sendOk(res, gatewayStore.getSnapshot(), {
+    syncOk: result.ok,
+    discoveredCount: result.discoveredCount ?? result.server.tools.length,
+    syncError: result.error,
+  });
 });
 
 app.patch('/api/v1/tools/:toolName', (req, res) => {
@@ -796,16 +946,33 @@ app.post('/api/v1/sandbox/rpc', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot(), { eventId: evt.id });
 });
 
-/* ---------- Unified MCP JSON-RPC 2.0 Entrypoint (/api/mcp/*) ---------- */
-app.get('/api/mcp/sse', (req, res) => {
+/* ---------- Unified MCP JSON-RPC 2.0 Entrypoint (/api/mcp & /api/mcp/*) ---------- */
+function resolveMcpHostHeader(req: express.Request): string {
+  const qHost = typeof req.query?.host === 'string' ? req.query.host.trim() : '';
+  const hHost = typeof req.headers['x-toolbox-host'] === 'string' ? req.headers['x-toolbox-host'].trim() : '';
+  return qHost || hHost || 'codex';
+}
+
+function attachMcpNotificationStream(req: express.Request, res: express.Response, sendEndpointEvent: boolean) {
+  const hostName = resolveMcpHostHeader(req);
+  gatewayStore.recordHostHeartbeat(hostName, { sessionDelta: 1 });
+
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders?.();
-  res.write(`event: endpoint\ndata: /api/mcp/messages\n\n`);
+  if (sendEndpointEvent) {
+    res.write(`event: endpoint\ndata: /api/mcp/messages?host=${encodeURIComponent(hostName)}\n\n`);
+  }
 
   const onEvent = (evt: { type: string; payload: unknown }) => {
-    if (evt.type === 'skill.mounted' || evt.type === 'skill.unmounted' || evt.type === 'tool.updated') {
+    if (
+      evt.type === 'skill.mounted' ||
+      evt.type === 'skill.unmounted' ||
+      evt.type === 'tool.updated' ||
+      evt.type === 'server.added' ||
+      evt.type === 'server.updated'
+    ) {
       const notification = {
         jsonrpc: '2.0',
         method: 'notifications/tools/list_changed',
@@ -819,23 +986,47 @@ app.get('/api/mcp/sse', (req, res) => {
   req.on('close', () => {
     clearInterval(keepalive);
     gatewayStore.events.off('gateway-event', onEvent);
+    gatewayStore.recordHostHeartbeat(hostName, { sessionDelta: -1 });
   });
+}
+
+app.get('/api/mcp', (req, res) => {
+  attachMcpNotificationStream(req, res, false);
 });
 
-app.post('/api/mcp/messages', (req, res) => {
-  const body = req.body || {};
-  const hostName = String(req.headers['x-toolbox-host'] || 'OpenCode');
-  const method =
-    body.method === 'tools/call' && typeof body.params?.name === 'string'
-      ? body.params.name
-      : typeof body.method === 'string'
-      ? body.method
-      : 'tools/list';
-  const args =
-    body.params?.arguments && typeof body.params.arguments === 'object' ? body.params.arguments : undefined;
+app.post('/api/mcp', async (req, res) => {
+  const hostName = resolveMcpHostHeader(req);
+  const incomingSession = req.headers['mcp-session-id'];
+  const sessionId =
+    typeof incomingSession === 'string' && incomingSession.trim()
+      ? incomingSession.trim()
+      : `tbx_${hostName}_${Date.now().toString(36)}`;
+  res.setHeader('Mcp-Session-Id', sessionId);
 
-  const evt = gatewayStore.executeRpc({ hostName, method, argumentsObj: args });
-  res.json(evt.responsePayload);
+  const outcome = await dispatchMcpJsonRpc(req.body, hostName);
+  if (outcome.isNotification) {
+    res.status(202).end();
+    return;
+  }
+  res.json(outcome.response);
+});
+
+app.delete('/api/mcp', (_req, res) => {
+  res.status(204).end();
+});
+
+app.get('/api/mcp/sse', (req, res) => {
+  attachMcpNotificationStream(req, res, true);
+});
+
+app.post('/api/mcp/messages', async (req, res) => {
+  const hostName = resolveMcpHostHeader(req);
+  const outcome = await dispatchMcpJsonRpc(req.body, hostName);
+  if (outcome.isNotification) {
+    res.status(202).end();
+    return;
+  }
+  res.json(outcome.response);
 });
 
 /* ---------- Engineering Docs & Prototype Routes ---------- */
@@ -882,9 +1073,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    writeDaemonLock({
+      pid: process.pid,
+      port: PORT,
+      startedAt: new Date().toISOString(),
+      workspaceRoot: ROOT_DIR,
+    });
     console.log(`Agent-Toolbox gateway & console listening on http://0.0.0.0:${PORT}`);
   });
+
+  const shutdown = () => {
+    downstreamPool.disconnectAll();
+    removeDaemonLockIfOwner(process.pid);
+    server.close(() => process.exit(0));
+  };
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 startServer().catch((err) => {

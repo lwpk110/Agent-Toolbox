@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { EventEmitter } from 'events';
+import { downstreamPool } from './downstreamPool';
 import type {
   AuditRpcEvent,
   CacheHitPoint,
@@ -14,6 +15,8 @@ import type {
   KnowledgeAnalytics,
   KnowledgeChunk,
   KnowledgeDoc,
+  McpPrompt,
+  McpResource,
   McpServer,
   MiddlewareId,
   MiddlewareRule,
@@ -1726,10 +1729,12 @@ export class GatewayStore {
       state: 'ok',
       fingerprint: fp,
       secretRef: secretRefNormalized,
+      origin: 'real',
       tools: [
         {
           name: fullToolName,
           serverId: id,
+          remoteName: toolSuffix || 'run_action',
           description: toolDesc,
           estimatedTokens: 260,
           mode: input.defaultMode,
@@ -3103,6 +3108,790 @@ export class GatewayStore {
     }
     this.emitEvent('rpc.executed', event);
     return event;
+  }
+
+  public getHostByIdOrName(hostIdOrName: string): HostProfile {
+    const clean = hostIdOrName.trim().toLowerCase();
+    return (
+      this.hosts.find((h) => h.id.toLowerCase() === clean || h.name.toLowerCase() === clean) ||
+      this.hosts.find((h) => h.id === 'codex') ||
+      this.hosts[0]
+    );
+  }
+
+  public recordHostHeartbeat(
+    hostIdOrName: string,
+    opts?: { latencyMs?: number; sessionDelta?: number }
+  ): HostProfile {
+    const host = this.getHostByIdOrName(hostIdOrName);
+    host.online = true;
+    host.lastSeenAt = new Date().toISOString();
+    if (typeof opts?.latencyMs === 'number' && Number.isFinite(opts.latencyMs)) {
+      host.latencyMs = Math.max(1, Math.round(opts.latencyMs));
+    }
+    if (typeof opts?.sessionDelta === 'number') {
+      host.activeSessions = Math.max(0, (host.activeSessions ?? 0) + opts.sessionDelta);
+    }
+    this.emitEvent('host.heartbeat', {
+      hostId: host.id,
+      online: host.online,
+      latencyMs: host.latencyMs,
+      lastSeenAt: host.lastSeenAt,
+      activeSessions: host.activeSessions ?? 0,
+    });
+    return host;
+  }
+
+  private resolveVaultString(rawValue: string): { value: string; missingKeys: string[] } {
+    const missingKeys: string[] = [];
+    const resolved = rawValue.replace(/vault:\/\/([A-Z0-9_]+)/g, (_m, keyName: string) => {
+      const enc = this.encryptedSecrets.get(keyName);
+      if (!enc) {
+        missingKeys.push(keyName);
+        return `vault://${keyName}`;
+      }
+      try {
+        return decryptSecret(enc);
+      } catch {
+        missingKeys.push(keyName);
+        return `vault://${keyName}`;
+      }
+    });
+    return { value: resolved, missingKeys };
+  }
+
+  public resolveServerSecrets(server: McpServer): {
+    ok: boolean;
+    env: Record<string, string>;
+    headers: Record<string, string>;
+    missingKeys: string[];
+  } {
+    const vaultOn = this.isMiddlewareEnabled('vault');
+    const missingKeys = new Set<string>();
+    const env: Record<string, string> = {};
+    const headers: Record<string, string> = {};
+
+    if (server.secretRef) {
+      const match = server.secretRef.match(/vault:\/\/([A-Z0-9_]+)/);
+      if (match) {
+        const keyName = match[1];
+        if (!this.encryptedSecrets.has(keyName)) {
+          missingKeys.add(keyName);
+        }
+      }
+    }
+
+    if (server.env) {
+      for (const [k, v] of Object.entries(server.env)) {
+        if (vaultOn && v.includes('vault://')) {
+          const res = this.resolveVaultString(v);
+          res.missingKeys.forEach((mk) => missingKeys.add(mk));
+          env[k] = res.value;
+        } else {
+          env[k] = v;
+        }
+      }
+    }
+
+    if (server.headers) {
+      for (const [k, v] of Object.entries(server.headers)) {
+        if (vaultOn && v.includes('vault://')) {
+          const res = this.resolveVaultString(v);
+          res.missingKeys.forEach((mk) => missingKeys.add(mk));
+          headers[k] = res.value;
+        } else {
+          headers[k] = v;
+        }
+      }
+    }
+
+    return {
+      ok: !vaultOn || missingKeys.size === 0,
+      env,
+      headers,
+      missingKeys: Array.from(missingKeys),
+    };
+  }
+
+  public async syncRealServer(serverId: string): Promise<{
+    ok: boolean;
+    server?: McpServer;
+    discoveredCount?: number;
+    quarantined?: boolean;
+    error?: string;
+  }> {
+    const server = this.servers.find((s) => s.id === serverId);
+    if (!server) {
+      return { ok: false, error: '未找到指定 MCP Server。' };
+    }
+
+    if (server.origin !== 'real') {
+      const pinged = this.pingServer(serverId);
+      return { ok: true, server: pinged || server, discoveredCount: server.tools.length };
+    }
+
+    const secrets = this.resolveServerSecrets(server);
+    if (!secrets.ok) {
+      server.state = 'degraded';
+      this.emitEvent('server.updated', { serverId: server.id });
+      return {
+        ok: false,
+        server,
+        error: `缺少 Vault 密钥：${secrets.missingKeys.join(', ')}`,
+      };
+    }
+
+    try {
+      const discovered = await downstreamPool.connectAndDiscover(server, secrets.env, secrets.headers);
+      server.latencyMs = discovered.latencyMs;
+      const prefix = `${server.id.replace(/-/g, '_')}__`;
+
+      const existingMap = new Map(server.tools.map((t) => [t.name, t]));
+      const detectedDrifts: QuarantineRecord[] = [];
+
+      const nextTools = discovered.tools.map((dt) => {
+        const fullName = `${prefix}${dt.remoteName}`;
+        const prev = existingMap.get(fullName);
+        const fp = computeCanonicalSha256({
+          name: fullName,
+          description: dt.description,
+          inputSchema: dt.inputSchema,
+        });
+        const lockedFp = prev?.lockedFingerprint || fp;
+        const drifted = Boolean(prev && prev.lockedFingerprint && prev.lockedFingerprint !== fp);
+        if (drifted) {
+          detectedDrifts.push({
+            serverId: server.id,
+            toolName: fullName,
+            expectedHash: `sha256:${lockedFp}`,
+            actualHash: `sha256:${fp}`,
+            baselineDescription: prev?.description || '',
+            mutatedDescription: dt.description,
+            riskReason: '下游实时同步检测到工具 Schema / 描述与 Lockfile 基线不一致。',
+            detectedAt: new Date().toISOString(),
+          });
+        }
+        const rawSchemaChars = JSON.stringify(dt.inputSchema).length + dt.description.length;
+        return {
+          name: fullName,
+          serverId: server.id,
+          remoteName: dt.remoteName,
+          description: dt.description,
+          estimatedTokens: Math.max(80, Math.round(rawSchemaChars / 3.5)),
+          mode: prev?.mode || 'lazy',
+          hitl: prev?.hitl ?? Boolean(dt.annotations?.destructiveHint),
+          fingerprint: fp,
+          lockedFingerprint: lockedFp,
+          readOnly: prev?.readOnly ?? Boolean(dt.annotations?.readOnlyHint),
+          annotations: dt.annotations,
+          inputSchema: dt.inputSchema,
+        };
+      });
+
+      const quarantinedTool = detectedDrifts[0] || null;
+
+      if (nextTools.length > 0) {
+        server.tools = nextTools;
+      }
+      server.resources = discovered.resources;
+      server.prompts = discovered.prompts;
+
+      if (quarantinedTool && this.isMiddlewareEnabled('quarantine')) {
+        server.state = 'quarantined';
+        server.fingerprint = quarantinedTool.actualHash.replace(/^sha256:/, '');
+        if (!this.quarantines.some((q) => q.serverId === server.id && q.toolName === quarantinedTool!.toolName)) {
+          this.quarantines.unshift(quarantinedTool);
+        }
+        this.emitEvent('quarantine.detected', { serverId: server.id });
+      } else {
+        server.state = server.enabled ? 'ok' : 'offline';
+        server.fingerprint = computeCanonicalSha256(nextTools.map((t) => t.fingerprint));
+        this.emitEvent('server.updated', { serverId: server.id });
+      }
+
+      this.markDirty();
+      return {
+        ok: true,
+        server,
+        discoveredCount: nextTools.length,
+        quarantined: Boolean(quarantinedTool),
+      };
+    } catch (err) {
+      server.state = 'degraded';
+      this.emitEvent('server.updated', { serverId: server.id });
+      return {
+        ok: false,
+        server,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+  }
+
+  public getToolsListForMcp(hostIdOrName: string): Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    annotations?: Record<string, unknown>;
+  }> {
+    const host = this.getHostByIdOrName(hostIdOrName);
+    const metaTools: Array<{
+      name: string;
+      description: string;
+      inputSchema: Record<string, unknown>;
+      annotations?: Record<string, unknown>;
+    }> = [
+      {
+        name: 'toolbox__discover_capabilities',
+        description:
+          'Semantic search across Lazy MCP tools and Standby Skill bundles without inflating context. Use this first when you need capabilities not listed in your current tools.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Natural language description of the task or needed capability.' },
+            topK: { type: 'number', description: 'Maximum candidate matches to return (default 5).' },
+          },
+          required: ['query'],
+        },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'toolbox__inspect_schema',
+        description:
+          'Inspect the full JSON inputSchema, fingerprint, and HITL status of a specific Lazy or Pinned MCP tool before calling it.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            toolName: { type: 'string', description: 'Namespaced tool name, e.g. github__create_issue' },
+          },
+          required: ['toolName'],
+        },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'toolbox__call_tool',
+        description:
+          'Proxy-execute any discovered Lazy MCP tool or mounted Skill tool by name through the Agent-Toolbox 5-stage security pipeline. Essential fallback for clients that do not dynamically refresh tools/list mid-turn.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            toolName: { type: 'string', description: 'Target namespaced tool name (e.g. github__search_code or skill_owasp__scan_deps).' },
+            arguments: { type: 'object', description: 'JSON arguments matching the tool inputSchema.' },
+          },
+          required: ['toolName'],
+        },
+      },
+      {
+        name: 'toolbox__load_skill',
+        description:
+          'Hot-mount a Dual-Layer Skill bundle (injects SKILL.md SOP, attached tools, and L3 file manifest) and notify tools/list_changed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            skillId: { type: 'string', description: 'Skill identifier, e.g. security-owasp-auditor' },
+          },
+          required: ['skillId'],
+        },
+      },
+      {
+        name: 'toolbox__unload_skill',
+        description: 'Unmount an active Skill bundle to free context tokens and notify tools/list_changed.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            skillId: { type: 'string', description: 'Skill identifier to unmount.' },
+          },
+          required: ['skillId'],
+        },
+      },
+      {
+        name: 'toolbox__read_skill_file',
+        description:
+          'Progressive L3 disclosure: read references/*, templates/*, or scripts/* inside a Skill bundle with path-traversal protection and secret redaction.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            skillId: { type: 'string', description: 'Skill bundle identifier.' },
+            filePath: { type: 'string', description: 'Relative path inside the skill bundle, e.g. references/checklist.md' },
+          },
+          required: ['skillId', 'filePath'],
+        },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'toolbox__search_knowledge',
+        description:
+          'Trinity unified search across private RAG docs, Cross-Agent Shared Memory (Codex/Claude/Antigravity/OpenCode), and Skill routing.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Search query in natural language.' },
+            includeMemory: { type: 'boolean', description: 'Include cross-agent shared memories (default true).' },
+            includeRouting: { type: 'boolean', description: 'Include Skill/tool routing suggestions (default true).' },
+          },
+          required: ['query'],
+        },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: 'toolbox__remember',
+        description:
+          'Persist an engineering decision, convention, or debugging lesson into Cross-Agent Shared Memory so Codex, Claude Code, Antigravity, and OpenCode can recall it later.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            topic: { type: 'string', description: 'Short topic label, e.g. Architecture or Codex Setup.' },
+            content: { type: 'string', description: 'Concise engineering memory content.' },
+            scope: { type: 'string', enum: ['global', 'project'], description: 'Visibility scope (default global).' },
+          },
+          required: ['topic', 'content'],
+        },
+      },
+    ];
+
+    const pinnedTools = this.servers
+      .filter((s) => s.enabled && s.state !== 'quarantined')
+      .flatMap((s) => s.tools.filter((t) => t.mode === 'pinned'))
+      .filter((t) => {
+        if (host.scope === 'min') {
+          return Boolean(t.readOnly || t.annotations?.readOnlyHint);
+        }
+        return true;
+      })
+      .map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: t.inputSchema || { type: 'object', properties: {} },
+        ...(t.annotations ? { annotations: t.annotations as Record<string, unknown> } : {}),
+      }));
+
+    const mountedSkillTools = this.skills
+      .filter((s) => s.mounted)
+      .flatMap((s) =>
+        s.attachedTools.map((at) => ({
+          name: at.name,
+          description: `[Skill: ${s.id}] ${at.description}`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              target: { type: 'string', description: 'Target path, symbol, or query for this skill tool.' },
+              options: { type: 'object', description: 'Optional tool parameters.' },
+            },
+          },
+        }))
+      );
+
+    return [...metaTools, ...pinnedTools, ...mountedSkillTools];
+  }
+
+  public getResourcesListForMcp(): McpResource[] {
+    return this.servers
+      .filter((s) => s.enabled && s.state !== 'quarantined')
+      .flatMap((s) => s.resources);
+  }
+
+  public getPromptsListForMcp(): McpPrompt[] {
+    return this.servers
+      .filter((s) => s.enabled && s.state !== 'quarantined')
+      .flatMap((s) => s.prompts);
+  }
+
+  public async callMcpTool(
+    hostIdOrName: string,
+    toolName: string,
+    args: Record<string, unknown> = {}
+  ): Promise<{
+    content: Array<{ type: string; text: string }>;
+    isError?: boolean;
+    errorCode?: number;
+    errorMessage?: string;
+    notification?: string;
+  }> {
+    const start = Date.now();
+    const host = this.getHostByIdOrName(hostIdOrName);
+    this.recordHostHeartbeat(host.id);
+
+    const pushAudit = (
+      outcome: AuditRpcEvent['outcome'],
+      responsePayload: Record<string, unknown>,
+      methodLabel = toolName
+    ) => {
+      const event: AuditRpcEvent = {
+        id: `rpc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+        timestamp: nowTimeStr(),
+        host: host.name,
+        method: methodLabel,
+        outcome,
+        latencyMs: Math.max(1, Date.now() - start),
+        requestPayload: {
+          jsonrpc: '2.0',
+          method: 'tools/call',
+          params: { name: toolName, arguments: args },
+        },
+        responsePayload,
+      };
+      this.auditLogs.unshift(event);
+      if (this.auditLogs.length > 60) {
+        this.auditLogs.length = 60;
+      }
+      this.emitEvent('rpc.executed', event);
+    };
+
+    const okResult = (data: unknown, notification?: string) => {
+      const rawText = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+      const redactedText = this.redactSensitiveText(rawText);
+      pushAudit('ok', { jsonrpc: '2.0', result: data, ...(notification ? { notification } : {}) });
+      return {
+        content: [{ type: 'text', text: redactedText }],
+        notification,
+      };
+    };
+
+    const errResult = (
+      code: number,
+      message: string,
+      outcome: AuditRpcEvent['outcome'] = 'blocked'
+    ) => {
+      pushAudit(outcome, { jsonrpc: '2.0', error: { code, message } });
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ error: { code, message } }, null, 2) }],
+        isError: true,
+        errorCode: code,
+        errorMessage: message,
+      };
+    };
+
+    // 1. Built-in Meta-Tools
+    if (toolName === 'toolbox__discover_capabilities') {
+      const query = String(args.query || '').trim();
+      const topK = typeof args.topK === 'number' && args.topK > 0 ? Math.min(20, Math.round(args.topK)) : 5;
+      const search = this.searchKnowledge(query || 'tools');
+
+      const qLower = query.toLowerCase();
+      const lazyTools = this.servers
+        .filter((s) => s.enabled && s.state !== 'quarantined')
+        .flatMap((s) =>
+          s.tools
+            .filter((t) => t.mode === 'lazy')
+            .map((t) => {
+              const hay = `${t.name} ${t.description} ${s.id}`.toLowerCase();
+              const hits = qLower
+                .split(/\s+/)
+                .filter(Boolean)
+                .reduce((acc, tok) => (hay.includes(tok) ? acc + 1 : acc), 0);
+              return {
+                id: t.name,
+                kind: 'mcp_tool' as const,
+                serverId: s.id,
+                mode: t.mode,
+                hitl: t.hitl,
+                readOnly: Boolean(t.readOnly || t.annotations?.readOnlyHint),
+                estimatedTokens: t.estimatedTokens,
+                summary: t.description,
+                score: hits > 0 ? Number(Math.min(0.98, 0.72 + hits * 0.08).toFixed(2)) : 0.65,
+              };
+            })
+        )
+        .sort((a, b) => b.score - a.score)
+        .slice(0, topK);
+
+      const skillMatches = search.routing.slice(0, topK).map((r) => ({
+        id: r.skillId,
+        kind: 'skill' as const,
+        mounted: r.mounted,
+        estimatedTokens: r.estimatedTokens,
+        summary: r.summary,
+        score: Number(r.score),
+      }));
+
+      return okResult({
+        query,
+        hint: 'Use toolbox__inspect_schema for any mcp_tool, toolbox__load_skill for any skill, and toolbox__call_tool to execute lazy tools directly.',
+        matches: [...skillMatches, ...lazyTools].slice(0, topK * 2),
+      });
+    }
+
+    if (toolName === 'toolbox__inspect_schema') {
+      const targetName = String(args.toolName || args.name || '').trim();
+      const matchedServer = this.servers.find((s) => s.tools.some((t) => t.name === targetName));
+      const matchedTool = matchedServer?.tools.find((t) => t.name === targetName);
+      if (!matchedServer || !matchedTool) {
+        return errResult(-32602, `Tool "${targetName}" not found in gateway registry.`);
+      }
+      return okResult({
+        toolName: matchedTool.name,
+        serverId: matchedServer.id,
+        protocol: matchedServer.protocol,
+        state: matchedServer.state,
+        description: matchedTool.description,
+        mode: matchedTool.mode,
+        hitlRequired: matchedTool.hitl,
+        readOnly: Boolean(matchedTool.readOnly || matchedTool.annotations?.readOnlyHint),
+        estimatedTokens: matchedTool.estimatedTokens,
+        fingerprint: `sha256:${matchedTool.fingerprint}`,
+        annotations: matchedTool.annotations || { readOnlyHint: matchedTool.readOnly },
+        inputSchema: matchedTool.inputSchema || { type: 'object', properties: {} },
+      });
+    }
+
+    if (toolName === 'toolbox__load_skill') {
+      const skillId = String(args.skillId || '').trim();
+      const mounted = this.mountSkill(skillId, host.name);
+      if (!mounted) {
+        return errResult(-32602, `Skill "${skillId}" not found.`);
+      }
+      return okResult(
+        {
+          status: 'mounted',
+          skillId: mounted.id,
+          version: mounted.version,
+          bundleFingerprint: `sha256:${mounted.fingerprint}`,
+          tokenCost: mounted.estimatedTokens,
+          tokenBreakdown: mounted.tokenBreakdown,
+          injectedTools: mounted.attachedTools.map((t) => t.name),
+          availableFiles: mounted.files
+            .filter((f) => f.category !== 'entry' && f.injectToModel)
+            .map((f) => ({ path: f.path, category: f.category, sizeBytes: f.sizeBytes, tier: 'L3' })),
+          skillMarkdown: mounted.skillMarkdown,
+        },
+        'notifications/tools/list_changed'
+      );
+    }
+
+    if (toolName === 'toolbox__unload_skill') {
+      const skillId = String(args.skillId || '').trim();
+      const unmounted = this.unmountSkill(skillId);
+      if (!unmounted) {
+        return errResult(-32602, `Skill "${skillId}" not found.`);
+      }
+      return okResult(
+        {
+          status: 'unmounted',
+          skillId: unmounted.id,
+          freedTokens: unmounted.estimatedTokens,
+        },
+        'notifications/tools/list_changed'
+      );
+    }
+
+    if (toolName === 'toolbox__read_skill_file') {
+      const skillId = String(args.skillId || '').trim();
+      const rawFilePath = String(args.filePath || args.path || '').trim();
+      const normalizedPath = normalizeSkillFilePath(rawFilePath);
+      if (!normalizedPath) {
+        return errResult(-32602, 'Invalid filePath: path traversal or absolute paths are forbidden.');
+      }
+      const skill = this.skills.find((s) => s.id === skillId);
+      if (!skill) {
+        return errResult(-32602, `Skill "${skillId}" not found.`);
+      }
+      const file = skill.files.find((f) => f.path === normalizedPath);
+      if (!file) {
+        return errResult(-32602, `File "${normalizedPath}" not found inside skill bundle "${skill.id}".`);
+      }
+      return okResult({
+        skillId: skill.id,
+        path: file.path,
+        category: file.category,
+        tier: file.category === 'entry' ? 'L2' : file.injectToModel ? 'L3' : 'human-only',
+        sha256: `sha256:${file.sha256}`,
+        bundleFingerprint: `sha256:${skill.fingerprint}`,
+        content: file.content,
+      });
+    }
+
+    if (toolName === 'toolbox__search_knowledge') {
+      const query = String(args.query || '').trim();
+      const includeMemory = args.includeMemory !== false;
+      const includeRouting = args.includeRouting !== false;
+      const res = this.searchKnowledge(query);
+      return okResult({
+        query,
+        latencyMs: res.latencyMs,
+        docs: res.docs,
+        memories: includeMemory ? res.memories : [],
+        routing: includeRouting ? res.routing : [],
+      });
+    }
+
+    if (toolName === 'toolbox__remember') {
+      const topic = String(args.topic || '工程经验').trim();
+      const content = String(args.content || '').trim();
+      const scope = args.scope === 'project' ? 'project' : 'global';
+      if (!content) {
+        return errResult(-32602, 'content is required for toolbox__remember.');
+      }
+      const memory = this.addMemory(host.name, topic, content, scope);
+      return okResult({
+        status: 'saved',
+        memory,
+      });
+    }
+
+    if (toolName === 'toolbox__call_tool') {
+      const innerToolName = String(args.toolName || args.name || '').trim();
+      const innerArgs =
+        args.arguments && typeof args.arguments === 'object' && !Array.isArray(args.arguments)
+          ? (args.arguments as Record<string, unknown>)
+          : {};
+      if (!innerToolName || innerToolName === 'toolbox__call_tool') {
+        return errResult(-32602, 'Valid target toolName is required for toolbox__call_tool.');
+      }
+      return this.callMcpTool(host.id, innerToolName, innerArgs);
+    }
+
+    // 2. Check Mounted / Standby Skill attached tools
+    const skillOwner = this.skills.find((s) => s.attachedTools.some((at) => at.name === toolName));
+    if (skillOwner) {
+      if (!skillOwner.mounted) {
+        return errResult(
+          -32602,
+          `Skill "${skillOwner.id}" is currently Standby. Call toolbox__load_skill({ skillId: "${skillOwner.id}" }) first.`
+        );
+      }
+      skillOwner.callCount += 1;
+      return okResult({
+        status: 'executed',
+        skill: skillOwner.id,
+        tool: toolName,
+        arguments: args,
+        note: `Executed skill tool "${toolName}" under host "${host.name}" (${host.scope}).`,
+      });
+    }
+
+    // 3. Downstream MCP Server Tool through 5-Stage Middleware Pipeline
+    const targetServer = this.servers.find((s) => s.tools.some((t) => t.name === toolName));
+    const targetTool = targetServer?.tools.find((t) => t.name === toolName);
+    if (!targetServer || !targetTool) {
+      return errResult(-32601, `Unknown tool "${toolName}". Run toolbox__discover_capabilities to find available tools.`);
+    }
+
+    // Stage 0: Server enabled & Host Profile Scope
+    if (!targetServer.enabled) {
+      return errResult(-32006, `Server "${targetServer.name}" is currently disabled in gateway.`);
+    }
+    const isReadOnly = Boolean(targetTool.readOnly || targetTool.annotations?.readOnlyHint);
+    if (host.scope === 'min' && !isReadOnly) {
+      return errResult(
+        -32003,
+        `Host "${host.name}" scope "min" forbids non-read-only tool "${targetTool.name}".`
+      );
+    }
+    if (host.scope === 'audit' && !isReadOnly) {
+      return errResult(
+        -32003,
+        `Host "${host.name}" scope "audit" forbids write/destructive tool "${targetTool.name}".`
+      );
+    }
+
+    // Stage 1: Vault Secret Resolution
+    const secrets = this.resolveServerSecrets(targetServer);
+    if (!secrets.ok) {
+      return errResult(
+        -32004,
+        `Missing Vault secret(s): ${secrets.missingKeys.join(', ')}. Configure them in Agent-Toolbox Vault.`
+      );
+    }
+
+    // Stage 2: Quarantine SHA-256 Lockfile Check
+    if (this.isMiddlewareEnabled('quarantine') && targetServer.state === 'quarantined') {
+      return errResult(
+        -32001,
+        `Tool "${targetTool.name}" blocked: server "${targetServer.name}" is quarantined due to schema fingerprint mismatch.`
+      );
+    }
+
+    // Stage 3: HITL Approval Gate
+    if (this.isMiddlewareEnabled('hitl') && targetTool.hitl) {
+      const approval: HitlApproval = {
+        id: `apr_${Date.now().toString(36)}`,
+        host: host.name,
+        toolName: targetTool.name,
+        argsPreview: JSON.stringify(args).slice(0, 140),
+        createdAt: nowTimeStr(),
+        status: 'pending',
+      };
+      this.pendingApprovals.unshift(approval);
+      this.emitEvent('hitl.pending', approval);
+      pushAudit('pending_approval', {
+        jsonrpc: '2.0',
+        result: { status: 'pending_approval', approvalId: approval.id },
+      });
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                status: 'pending_approval',
+                approvalId: approval.id,
+                message: 'HITL approval required in Agent-Toolbox console before execution.',
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    // Stage 4: Execute Real Downstream MCP or Demo Fallback
+    if (targetServer.origin === 'real') {
+      try {
+        const prefix = `${targetServer.id.replace(/-/g, '_')}__`;
+        const remoteName =
+          targetTool.remoteName ||
+          (targetTool.name.startsWith(prefix) ? targetTool.name.slice(prefix.length) : targetTool.name);
+        const remoteRes = await downstreamPool.callTool(
+          targetServer,
+          remoteName,
+          args,
+          secrets.env,
+          secrets.headers
+        );
+        targetServer.latencyMs = remoteRes.latencyMs;
+        const redactedContent = remoteRes.content.map((item) => ({
+          type: 'text',
+          text:
+            typeof item.text === 'string'
+              ? this.redactSensitiveText(item.text)
+              : this.redactSensitiveText(JSON.stringify(item)),
+        }));
+        pushAudit(remoteRes.isError ? 'blocked' : 'ok', {
+          jsonrpc: '2.0',
+          result: { isError: Boolean(remoteRes.isError), content: redactedContent },
+        });
+        return {
+          content: redactedContent,
+          isError: remoteRes.isError,
+        };
+      } catch (err) {
+        return errResult(
+          -32006,
+          `Downstream "${targetServer.name}" error: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+
+    // Demo fallback for built-in sample servers
+    if (targetTool.name === 'postgres__query') {
+      const sampleToken = ['ghp', 'sandboxRedactionSample9876543210'].join('_');
+      const sampleDsn = ['postgresql://', 'readonly:demo_pass', '@db.internal:5432/prod'].join('');
+      const rawOutput = `Connected with ${sampleDsn}; token=${sampleToken}; rows=42`;
+      return okResult({
+        redactionActive: this.isMiddlewareEnabled('redact'),
+        output: this.redactSensitiveText(rawOutput),
+      });
+    }
+
+    return okResult({
+      status: 'executed',
+      server: targetServer.name,
+      protocol: targetServer.protocol,
+      tool: targetTool.name,
+      arguments: args,
+      vaultInjected: Boolean(targetServer.secretRef),
+      note: 'Executed via Agent-Toolbox gateway.',
+    });
   }
 }
 

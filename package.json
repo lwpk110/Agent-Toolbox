@@ -1,15 +1,20 @@
 {
-  "name": "react-example",
+  "name": "agent-toolbox",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "agent-toolbox": "src/cli.ts"
+  },
   "scripts": {
     "dev": "tsx server.ts",
+    "cli": "tsx src/cli.ts",
     "build": "vite build && tsc --noEmit",
     "start": "tsx server.ts --production",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
