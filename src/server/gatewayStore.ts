@@ -15,6 +15,11 @@ import type {
   MiddlewareRule,
   QuarantineRecord,
   SharedMemory,
+  SkillAttachedTool,
+  SkillFileCategory,
+  SkillFileEntry,
+  SkillSourceType,
+  SkillTokenBreakdown,
   SyncPreflightResult,
   SyncStatus,
   TransportProtocol,
@@ -89,6 +94,237 @@ export function computeCanonicalSha256(payload: unknown): string {
     return val;
   };
   return crypto.createHash('sha256').update(JSON.stringify(normalize(payload))).digest('hex').slice(0, 6);
+}
+
+const MAX_SKILL_FILES = 60;
+const MAX_SKILL_FILE_BYTES = 200 * 1024;
+
+export function normalizeSkillFilePath(rawPath: string): string | null {
+  if (typeof rawPath !== 'string') return null;
+  const cleaned = rawPath.replace(/\\/g, '/').trim();
+  if (!cleaned || cleaned.length > 240) return null;
+  if (cleaned.includes('\0') || cleaned.startsWith('/') || /^[a-zA-Z]:/.test(cleaned)) return null;
+  if (/[\r\n]/.test(cleaned)) return null;
+
+  const segments = cleaned.split('/');
+  for (const seg of segments) {
+    if (!seg || seg === '.' || seg === '..') return null;
+  }
+  const normalized = segments.join('/');
+  if (normalized.toLowerCase() === 'skill.md') return 'SKILL.md';
+  return normalized;
+}
+
+export function classifySkillFile(filePath: string): {
+  category: SkillFileCategory;
+  injectToModel: boolean;
+} {
+  const lower = filePath.toLowerCase();
+  if (lower === 'skill.md') {
+    return { category: 'entry', injectToModel: true };
+  }
+  if (
+    lower === 'readme.md' ||
+    lower === 'changelog.md' ||
+    lower === 'license' ||
+    lower === 'license.md'
+  ) {
+    return { category: 'readme', injectToModel: false };
+  }
+  if (
+    lower.startsWith('scripts/') ||
+    /\.(sh|bash|zsh|py|ts|tsx|js|mjs|cjs|rb|ps1)$/.test(lower)
+  ) {
+    return { category: 'script', injectToModel: true };
+  }
+  if (lower.startsWith('references/') || lower.startsWith('docs/')) {
+    return { category: 'reference', injectToModel: true };
+  }
+  if (lower.startsWith('templates/')) {
+    return { category: 'template', injectToModel: true };
+  }
+  return { category: 'asset', injectToModel: true };
+}
+
+export function parseSkillFrontmatter(markdown: string): {
+  name?: string;
+  description?: string;
+  version?: string;
+} {
+  const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!match) return {};
+  const yaml = match[1];
+  const lines = yaml.split(/\r?\n/);
+
+  const unquote = (val: string) =>
+    val
+      .trim()
+      .replace(/^["'](.*)["']$/, '$1')
+      .trim();
+
+  let name: string | undefined;
+  let description: string | undefined;
+  let trigger: string | undefined;
+  let version: string | undefined;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    const kv = line.match(/^([a-zA-Z0-9_-]+):\s*(.*)$/);
+    if (!kv) {
+      const nestedVer = line.match(/^\s+version:\s*(.+)$/);
+      if (nestedVer && !version) {
+        version = unquote(nestedVer[1]);
+      }
+      continue;
+    }
+    const key = kv[1].toLowerCase();
+    const rawVal = kv[2].trim();
+
+    if ((rawVal === '>' || rawVal === '>-' || rawVal === '|' || rawVal === '|-') && key === 'description') {
+      const folded: string[] = [];
+      while (i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) {
+        i += 1;
+        folded.push(lines[i].trim());
+      }
+      description = folded.join(' ').trim();
+      continue;
+    }
+
+    const val = unquote(rawVal);
+    if (!val) continue;
+    if (key === 'name' && !name) name = val;
+    else if (key === 'description' && !description) description = val;
+    else if (key === 'trigger' && !trigger) trigger = val;
+    else if (key === 'version' && !version) version = val;
+  }
+
+  return {
+    name,
+    description: description || trigger,
+    version,
+  };
+}
+
+function buildSkillFileEntry(filePath: string, content: string): SkillFileEntry {
+  const { category, injectToModel } = classifySkillFile(filePath);
+  const sha256 = crypto.createHash('sha256').update(content, 'utf8').digest('hex').slice(0, 8);
+  return {
+    path: filePath,
+    category,
+    content,
+    sizeBytes: Buffer.byteLength(content, 'utf8'),
+    sha256,
+    injectToModel,
+  };
+}
+
+const CATEGORY_SORT_ORDER: Record<SkillFileCategory, number> = {
+  entry: 0,
+  script: 1,
+  reference: 2,
+  template: 3,
+  asset: 4,
+  readme: 5,
+};
+
+function sortSkillFiles(files: SkillFileEntry[]): SkillFileEntry[] {
+  return [...files].sort((a, b) => {
+    const catDiff = CATEGORY_SORT_ORDER[a.category] - CATEGORY_SORT_ORDER[b.category];
+    if (catDiff !== 0) return catDiff;
+    return a.path.localeCompare(b.path);
+  });
+}
+
+function computeSkillBundleFingerprint(
+  id: string,
+  version: string,
+  files: SkillFileEntry[],
+  attachedTools: SkillAttachedTool[]
+): string {
+  const sorted = sortSkillFiles(files);
+  return computeCanonicalSha256({
+    id,
+    version,
+    files: sorted.map((f) => ({ path: f.path, sha256: f.sha256 })),
+    attachedTools,
+  });
+}
+
+function computeSkillTokenMetrics(
+  skillMarkdown: string,
+  attachedTools: SkillAttachedTool[],
+  files: SkillFileEntry[],
+  presetTotalTokens?: number
+): { estimatedTokens: number; tokenBreakdown: SkillTokenBreakdown } {
+  const toolsTokens = attachedTools.reduce((sum, t) => sum + t.estimatedTokens, 0);
+  const metadataTokens = Math.min(110, Math.max(55, Math.round(skillMarkdown.slice(0, 260).length * 0.35)));
+  const computedEntryTokens = Math.max(160, Math.round(skillMarkdown.length * 0.55));
+  const estimatedTokens =
+    typeof presetTotalTokens === 'number'
+      ? presetTotalTokens
+      : Math.max(280, computedEntryTokens + toolsTokens);
+  const entryTokens = Math.max(120, estimatedTokens - toolsTokens);
+  const onDemandFiles = files.filter((f) => f.category !== 'entry' && f.injectToModel).length;
+  const humanOnlyFiles = files.filter((f) => !f.injectToModel).length;
+
+  return {
+    estimatedTokens,
+    tokenBreakdown: {
+      metadataTokens,
+      entryTokens,
+      toolsTokens,
+      onDemandFiles,
+      humanOnlyFiles,
+    },
+  };
+}
+
+function createSeededSkill(input: {
+  id: string;
+  version: string;
+  summary: string;
+  estimatedTokens: number;
+  callCount: number;
+  successRate: string;
+  mounted: boolean;
+  mountedBy: string;
+  skillMarkdown: string;
+  attachedTools: SkillAttachedTool[];
+  extraFiles: Array<{ path: string; content: string }>;
+}): DualLayerSkill {
+  const files = sortSkillFiles([
+    buildSkillFileEntry('SKILL.md', input.skillMarkdown),
+    ...input.extraFiles.map((f) => buildSkillFileEntry(f.path, f.content)),
+  ]);
+  const fingerprint = computeSkillBundleFingerprint(
+    input.id,
+    input.version,
+    files,
+    input.attachedTools
+  );
+  const { estimatedTokens, tokenBreakdown } = computeSkillTokenMetrics(
+    input.skillMarkdown,
+    input.attachedTools,
+    files,
+    input.estimatedTokens
+  );
+  return {
+    id: input.id,
+    version: input.version,
+    summary: input.summary,
+    estimatedTokens,
+    callCount: input.callCount,
+    successRate: input.successRate,
+    mounted: input.mounted,
+    mountedBy: input.mountedBy,
+    fingerprint,
+    skillMarkdown: input.skillMarkdown,
+    attachedTools: input.attachedTools,
+    files,
+    sourceType: 'builtin',
+    sourcePath: `skills/${input.id}`,
+    tokenBreakdown,
+  };
 }
 
 function nowTimeStr(): string {
@@ -411,7 +647,7 @@ export class GatewayStore {
   ];
 
   private skills: DualLayerSkill[] = [
-    {
+    createSeededSkill({
       id: 'ast-code-refactor',
       version: '1.4.0',
       summary: '跨文件安全重构 TypeScript 代码',
@@ -420,15 +656,32 @@ export class GatewayStore {
       successRate: '98.4%',
       mounted: true,
       mountedBy: 'Claude Code',
-      fingerprint: 'b71c04',
       skillMarkdown:
-        '---\nname: ast-code-refactor\ntrigger: "当需要执行跨文件 TypeScript AST 安全重构时加载"\n---\n# AST 自动化代码重构标准作业规程 (SOP)\n1. 调用 `skill_ast__analyze_symbols` 分析符号引用图\n2. 验证引用完整性后执行 `skill_ast__apply_codemod`\n3. 运行类型检查确认零回归',
+        '---\nname: ast-code-refactor\nversion: 1.4.0\ndescription: "当需要执行跨文件 TypeScript AST 安全重构时加载"\n---\n# AST 自动化代码重构标准作业规程 (SOP)\n1. 调用 `skill_ast__analyze_symbols` 分析符号引用图\n2. 如涉及泛型或类型守卫迁移，按需读取 `references/ts-codemod-rules.md`\n3. 验证引用完整性后执行 `skill_ast__apply_codemod` 并运行 `scripts/verify-typecheck.sh` 确认零回归',
       attachedTools: [
         { name: 'skill_ast__analyze_symbols', estimatedTokens: 210, description: '构建跨文件 TypeScript AST 符号依赖图' },
         { name: 'skill_ast__apply_codemod', estimatedTokens: 150, description: '按原子补丁应用安全重构变更' },
       ],
-    },
-    {
+      extraFiles: [
+        {
+          path: 'scripts/verify-typecheck.sh',
+          content: '#!/usr/bin/env bash\nset -euo pipefail\necho "[ast-code-refactor] Running tsc --noEmit..."\nnpx tsc --noEmit --pretty false\necho "[ast-code-refactor] Typecheck passed with 0 errors."\n',
+        },
+        {
+          path: 'references/ts-codemod-rules.md',
+          content: '# TypeScript AST 重构安全规范 (L3 按需参考)\n\n- 严禁通过正则全局替换导出符号，必须经由 TypeChecker 解析符号定义位置。\n- 修改公共接口字段前，需确认所有 Barrel (`index.ts`) 重导出同步更新。\n- 每次原子补丁最多改动 15 个文件，变更后必须执行 `scripts/verify-typecheck.sh`。',
+        },
+        {
+          path: 'templates/codemod-plan.md',
+          content: '# 重构变更单模板\n- 目标符号：`{{symbolName}}`\n- 影响文件数：`{{affectedCount}}`\n- 回滚命令：`git checkout -- {{paths}}`\n',
+        },
+        {
+          path: 'README.md',
+          content: '# ast-code-refactor\n\n人类维护说明（不注入模型上下文，占用 0 Token）。\n\n## 本地测试\n运行 `bash scripts/verify-typecheck.sh` 校验类型安全。',
+        },
+      ],
+    }),
+    createSeededSkill({
       id: 'security-owasp-auditor',
       version: '2.1.0',
       summary: '按 OWASP 清单扫描依赖与代码漏洞',
@@ -437,15 +690,32 @@ export class GatewayStore {
       successRate: '—',
       mounted: false,
       mountedBy: '',
-      fingerprint: '6e30a1',
       skillMarkdown:
-        '---\nname: security-owasp-auditor\ntrigger: "当需要做依赖与代码安全审计时加载"\n---\n# OWASP 安全审计 SOP\n1. 调用 `skill_owasp__scan_deps` 扫描依赖树与已知 CVE\n2. 调用 `skill_owasp__report` 汇总高危项并生成修复补丁建议',
+        '---\nname: security-owasp-auditor\nversion: 2.1.0\ndescription: "当需要做依赖与代码安全审计时加载"\n---\n# OWASP 安全审计 SOP\n1. 调用 `skill_owasp__scan_deps` 扫描依赖树与已知 CVE\n2. 针对命中项按需读取 `references/owasp-top10-checklist.md`\n3. 调用 `skill_owasp__report` 按 `templates/audit-report.md` 输出结构化修复建议',
       attachedTools: [
         { name: 'skill_owasp__scan_deps', estimatedTokens: 380, description: '扫描项目依赖与高危漏洞清单' },
         { name: 'skill_owasp__report', estimatedTokens: 220, description: '输出结构化 OWASP 审计报告' },
       ],
-    },
-    {
+      extraFiles: [
+        {
+          path: 'scripts/scan-lockfile.py',
+          content: '#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps({"scanner": "owasp-lockfile", "status": "ready"}))\n',
+        },
+        {
+          path: 'references/owasp-top10-checklist.md',
+          content: '# OWASP Top 10 审查清单 (L3 按需参考)\n\n- A01 Broken Access Control：核对所有写入接口的服务端鉴权与资源归属校验。\n- A03 Injection：禁止 SQL 拼接、未转义 Shell 调用与原始 HTML 注入。\n- A07 Secret Exposure：凭据仅存于服务端环境变量或加密 Vault，禁止硬编码。',
+        },
+        {
+          path: 'templates/audit-report.md',
+          content: '# 安全审计报告\n- 扫描范围：`{{scope}}`\n- 高危项：`{{highCount}}`\n- 修复建议：`{{remediation}}`\n',
+        },
+        {
+          path: 'README.md',
+          content: '# security-owasp-auditor\n\n维护者文档（仅人类阅读，0 Token 开销）。定期同步 CVE 规则基线。',
+        },
+      ],
+    }),
+    createSeededSkill({
       id: 'sql-query-optimizer',
       version: '1.1.2',
       summary: '检查并优化 SQL 与数据库迁移脚本',
@@ -454,14 +724,27 @@ export class GatewayStore {
       successRate: '97.1%',
       mounted: true,
       mountedBy: 'Codex CLI',
-      fingerprint: '2f88d5',
       skillMarkdown:
-        '---\nname: sql-query-optimizer\ntrigger: "当需要校验数据库迁移或慢查询时加载"\n---\n# SQL 优化 SOP\n1. 调用 `skill_sql__explain` 解析执行计划与全表扫描风险\n2. 给出复合索引与无锁 DDL 迁移建议',
+        '---\nname: sql-query-optimizer\nversion: 1.1.2\ndescription: "当需要校验数据库迁移或慢查询时加载"\n---\n# SQL 优化 SOP\n1. 调用 `skill_sql__explain` 解析执行计划与全表扫描风险\n2. 涉及大表 DDL 时读取 `references/zero-downtime-ddl.md`\n3. 给出复合索引与无锁 DDL 迁移建议',
       attachedTools: [
         { name: 'skill_sql__explain', estimatedTokens: 190, description: '解析 EXPLAIN ANALYZE 执行计划并定位瓶颈' },
       ],
-    },
-    {
+      extraFiles: [
+        {
+          path: 'scripts/check-migration.sh',
+          content: '#!/usr/bin/env bash\nset -euo pipefail\ngrep -rnEi "DROP TABLE|ALTER TABLE .* ADD COLUMN .* DEFAULT" migrations/ || echo "No locking DDL found."\n',
+        },
+        {
+          path: 'references/zero-downtime-ddl.md',
+          content: '# PostgreSQL 无锁迁移规范 (L3 按需参考)\n\n- 建索引必须使用 `CREATE INDEX CONCURRENTLY`。\n- 禁止在单事务内对千万级大表执行 `ADD COLUMN ... NOT NULL` 无默认值变更。',
+        },
+        {
+          path: 'README.md',
+          content: '# sql-query-optimizer\n\n供 DBA 与研发团队维护的 SQL 审查 Skill 包（README 不注入模型上下文）。',
+        },
+      ],
+    }),
+    createSeededSkill({
       id: 'mcp-diagnostics-prober',
       version: '0.9.3',
       summary: '诊断网关握手超时与连接池重连问题',
@@ -470,16 +753,29 @@ export class GatewayStore {
       successRate: '—',
       mounted: false,
       mountedBy: '',
-      fingerprint: '9a41c2',
       skillMarkdown:
-        '---\nname: mcp-diagnostics-prober\ntrigger: "当出现 MCP 握手超时或断连时加载"\n---\n# 网关诊断 SOP\n1. 调用 `skill_diag__probe` 探测下游心跳与握手延迟\n2. 调用 `skill_diag__pool_stats` 检查连接池重连与背压策略\n3. 必要时调用 `skill_diag__trace` 导出最近 20 条 RPC 链路',
+        '---\nname: mcp-diagnostics-prober\nversion: 0.9.3\ndescription: "当出现 MCP 握手超时或断连时加载"\n---\n# 网关诊断 SOP\n1. 调用 `skill_diag__probe` 探测下游心跳与握手延迟\n2. 调用 `skill_diag__pool_stats` 检查连接池重连与背压策略\n3. 参照 `references/error-codes.md` 定位 JSON-RPC 错误码并导出最近 20 条链路',
       attachedTools: [
         { name: 'skill_diag__probe', estimatedTokens: 160, description: '主动探活下游 MCP 进程与 SSE 通道' },
         { name: 'skill_diag__pool_stats', estimatedTokens: 140, description: '查看守护进程连接池统计与退避状态' },
         { name: 'skill_diag__trace', estimatedTokens: 120, description: '导出最近握手与错误堆栈追踪' },
       ],
-    },
-    {
+      extraFiles: [
+        {
+          path: 'references/error-codes.md',
+          content: '# MCP 网关错误码手册 (L3 按需参考)\n\n- `-32001`: Quarantine 指纹失配阻断\n- `-32002`: HITL 审批拒绝\n- `-32003`: 宿主权限 Scope 越权拦截\n- `-32602`: 无效参数或非法文件路径',
+        },
+        {
+          path: 'scripts/probe-sse.sh',
+          content: '#!/usr/bin/env bash\ncurl -fsS -m 5 http://127.0.0.1:3000/health\n',
+        },
+        {
+          path: 'README.md',
+          content: '# mcp-diagnostics-prober\n\nMCP 网关排障能力包（人类阅读说明，0 Token 开销）。',
+        },
+      ],
+    }),
+    createSeededSkill({
       id: 'docs-writer',
       version: '1.0.0',
       summary: '按团队模板撰写 PRD、架构设计与 ADR 文档',
@@ -488,14 +784,27 @@ export class GatewayStore {
       successRate: '—',
       mounted: false,
       mountedBy: '',
-      fingerprint: '44b0e7',
       skillMarkdown:
-        '---\nname: docs-writer\ntrigger: "当需要撰写或整理技术文档时加载"\n---\n# 文档写作 SOP\n1. 调用 `skill_docs__template` 拉取标准文档骨架\n2. 生成含 Mermaid 架构图的规范 Markdown 正文',
+        '---\nname: docs-writer\nversion: 1.0.0\ndescription: "当需要撰写或整理技术文档时加载"\n---\n# 文档写作 SOP\n1. 调用 `skill_docs__template` 或读取 `templates/adr-template.md` 拉取标准文档骨架\n2. 生成含 Mermaid 架构图的规范 Markdown 正文',
       attachedTools: [
         { name: 'skill_docs__template', estimatedTokens: 110, description: '读取团队 PRD / ADR / RFC 模板' },
       ],
-    },
-    {
+      extraFiles: [
+        {
+          path: 'templates/adr-template.md',
+          content: '# ADR-XXX: 决策标题\n\n- 状态：提议中 / 已采纳\n- 背景与痛点：\n- 备选方案对比：\n- 最终决策与权衡：\n',
+        },
+        {
+          path: 'templates/prd-checklist.md',
+          content: '# PRD 验收清单模板\n- [ ] 明确目标用户与边界\n- [ ] 列出可测试的验收指标\n- [ ] 标注安全与权限约束\n',
+        },
+        {
+          path: 'README.md',
+          content: '# docs-writer\n\n团队工程文档模板集合（README 仅人类可读，0 Token 开销）。',
+        },
+      ],
+    }),
+    createSeededSkill({
       id: 'git-release-helper',
       version: '1.2.0',
       summary: '汇总提交记录、生成版本说明并打语义化标签',
@@ -504,13 +813,26 @@ export class GatewayStore {
       successRate: '—',
       mounted: false,
       mountedBy: '',
-      fingerprint: 'd09f63',
       skillMarkdown:
-        '---\nname: git-release-helper\ntrigger: "当需要发布新版本时加载"\n---\n# 发布 SOP\n1. 汇总距上一标签的提交记录与破坏性变更\n2. 调用 `skill_git__changelog` 生成规范 CHANGELOG',
+        '---\nname: git-release-helper\nversion: 1.2.0\ndescription: "当需要发布新版本时加载"\n---\n# 发布 SOP\n1. 汇总距上一标签的提交记录与破坏性变更\n2. 调用 `skill_git__changelog` 并套用 `templates/release-notes.md` 生成规范 CHANGELOG',
       attachedTools: [
         { name: 'skill_git__changelog', estimatedTokens: 170, description: '按 Conventional Commits 生成版本说明' },
       ],
-    },
+      extraFiles: [
+        {
+          path: 'scripts/tag-release.sh',
+          content: '#!/usr/bin/env bash\nset -euo pipefail\nTAG="${1:?Usage: tag-release.sh vX.Y.Z}"\ngit tag -a "$TAG" -m "Release $TAG"\n',
+        },
+        {
+          path: 'templates/release-notes.md',
+          content: '## {{version}} ({{date}})\n\n### Features\n- {{features}}\n\n### Fixes\n- {{fixes}}\n',
+        },
+        {
+          path: 'README.md',
+          content: '# git-release-helper\n\n版本发布辅助 Skill 包（README 不注入模型上下文）。',
+        },
+      ],
+    }),
   ];
 
   private docs: KnowledgeDoc[] = [
@@ -713,11 +1035,19 @@ export class GatewayStore {
     };
 
     const lockfileObj = {
-      schemaVersion: '1.0',
+      schemaVersion: '1.1',
       tools: Object.fromEntries(
         this.servers.flatMap((s) => s.tools.map((t) => [t.name, `sha256:${t.lockedFingerprint}`]))
       ),
-      skills: Object.fromEntries(this.skills.map((s) => [s.id, `sha256:${s.fingerprint}`])),
+      skills: Object.fromEntries(
+        this.skills.map((s) => [
+          s.id,
+          {
+            bundleHash: `sha256:${s.fingerprint}`,
+            fileCount: s.files.length,
+          },
+        ])
+      ),
     };
 
     const manifestJson = JSON.stringify(manifestObj, null, 2);
@@ -978,26 +1308,118 @@ export class GatewayStore {
   }
 
   public updateSkillMarkdown(skillId: string, markdown: string): DualLayerSkill | null {
+    const res = this.upsertSkillFile(skillId, 'SKILL.md', markdown);
+    return res.skill || null;
+  }
+
+  public upsertSkillFile(
+    skillId: string,
+    rawPath: string,
+    content: string
+  ): { skill?: DualLayerSkill; file?: SkillFileEntry; error?: string } {
     const skill = this.skills.find((s) => s.id === skillId);
-    if (!skill) return null;
-    skill.skillMarkdown = markdown;
-    skill.fingerprint = computeCanonicalSha256({
-      id: skill.id,
-      version: skill.version,
-      skillMarkdown: markdown,
-      attachedTools: skill.attachedTools,
-    });
+    if (!skill) return { error: '未找到指定 Skill。' };
+
+    const filePath = normalizeSkillFilePath(rawPath);
+    if (!filePath) {
+      return { error: '文件路径非法（仅支持相对路径，禁止包含 ..、绝对路径或空字符）。' };
+    }
+    if (Buffer.byteLength(content, 'utf8') > MAX_SKILL_FILE_BYTES) {
+      return { error: '单个文件体积不能超过 200KB。' };
+    }
+
+    const entry = buildSkillFileEntry(filePath, content);
+    const existingIdx = skill.files.findIndex((f) => f.path.toLowerCase() === filePath.toLowerCase());
+    if (existingIdx >= 0) {
+      skill.files[existingIdx] = entry;
+    } else {
+      if (skill.files.length >= MAX_SKILL_FILES) {
+        return { error: `单个 Skill 目录最多包含 ${MAX_SKILL_FILES} 个文件。` };
+      }
+      skill.files.push(entry);
+    }
+
+    skill.files = sortSkillFiles(skill.files);
+    if (entry.path === 'SKILL.md') {
+      skill.skillMarkdown = content;
+      const fm = parseSkillFrontmatter(content);
+      if (fm.version) skill.version = fm.version;
+    }
+
+    const { estimatedTokens, tokenBreakdown } = computeSkillTokenMetrics(
+      skill.skillMarkdown,
+      skill.attachedTools,
+      skill.files
+    );
+    skill.estimatedTokens = estimatedTokens;
+    skill.tokenBreakdown = tokenBreakdown;
+    skill.fingerprint = computeSkillBundleFingerprint(
+      skill.id,
+      skill.version,
+      skill.files,
+      skill.attachedTools
+    );
     this.markDirty();
-    this.emitEvent('skill.updated', { skillId, fingerprint: skill.fingerprint });
-    return skill;
+    this.emitEvent('skill.updated', {
+      skillId,
+      path: entry.path,
+      fingerprint: skill.fingerprint,
+    });
+    return { skill, file: entry };
+  }
+
+  public deleteSkillFile(
+    skillId: string,
+    rawPath: string
+  ): { skill?: DualLayerSkill; error?: string } {
+    const skill = this.skills.find((s) => s.id === skillId);
+    if (!skill) return { error: '未找到指定 Skill。' };
+
+    const filePath = normalizeSkillFilePath(rawPath);
+    if (!filePath) {
+      return { error: '文件路径非法。' };
+    }
+    if (filePath === 'SKILL.md') {
+      return { error: '入口文件 SKILL.md 为必需文件，不可删除。' };
+    }
+
+    const beforeLen = skill.files.length;
+    skill.files = skill.files.filter((f) => f.path !== filePath);
+    if (skill.files.length === beforeLen) {
+      return { error: `未找到文件 ${filePath}。` };
+    }
+
+    const { estimatedTokens, tokenBreakdown } = computeSkillTokenMetrics(
+      skill.skillMarkdown,
+      skill.attachedTools,
+      skill.files
+    );
+    skill.estimatedTokens = estimatedTokens;
+    skill.tokenBreakdown = tokenBreakdown;
+    skill.fingerprint = computeSkillBundleFingerprint(
+      skill.id,
+      skill.version,
+      skill.files,
+      skill.attachedTools
+    );
+    this.markDirty();
+    this.emitEvent('skill.updated', {
+      skillId,
+      deletedPath: filePath,
+      fingerprint: skill.fingerprint,
+    });
+    return { skill };
   }
 
   public createSkill(input: {
     id: string;
-    version: string;
-    summary: string;
-    skillMarkdown: string;
+    version?: string;
+    summary?: string;
+    skillMarkdown?: string;
     toolName?: string;
+    files?: Array<{ path: string; content: string }>;
+    sourceType?: SkillSourceType;
+    sourcePath?: string;
   }): { skill?: DualLayerSkill; error?: string } {
     const id = input.id.trim().toLowerCase();
     if (!/^[a-z0-9-]+$/.test(id)) {
@@ -1006,40 +1428,105 @@ export class GatewayStore {
     if (this.skills.some((s) => s.id === id)) {
       return { error: `Skill「${id}」已存在，请更换名称。` };
     }
-    const cleanTool =
-      (input.toolName || `skill_${id.replace(/-/g, '_')}__run`).trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-    const attachedTools = [
-      {
-        name: cleanTool,
-        estimatedTokens: 180,
-        description: `执行 ${id} 配套工具`,
-      },
-    ];
-    const estimatedTokens = Math.max(320, Math.round(input.skillMarkdown.length * 1.4) + 180);
-    const fingerprint = computeCanonicalSha256({
-      id,
-      version: input.version.trim() || '1.0.0',
-      skillMarkdown: input.skillMarkdown,
+
+    const fileMap = new Map<string, SkillFileEntry>();
+    if (Array.isArray(input.files)) {
+      if (input.files.length > MAX_SKILL_FILES) {
+        return { error: `目录包文件数不能超过 ${MAX_SKILL_FILES} 个。` };
+      }
+      for (const rawFile of input.files) {
+        if (!rawFile || typeof rawFile.path !== 'string' || typeof rawFile.content !== 'string') {
+          return { error: '目录文件列表格式不正确。' };
+        }
+        const normalized = normalizeSkillFilePath(rawFile.path);
+        if (!normalized) {
+          return { error: `非法文件路径：${rawFile.path}` };
+        }
+        if (Buffer.byteLength(rawFile.content, 'utf8') > MAX_SKILL_FILE_BYTES) {
+          return { error: `文件 ${normalized} 体积超过 200KB 上限。` };
+        }
+        fileMap.set(normalized, buildSkillFileEntry(normalized, rawFile.content));
+      }
+    }
+
+    const providedMd = typeof input.skillMarkdown === 'string' && input.skillMarkdown.trim()
+      ? input.skillMarkdown
+      : fileMap.get('SKILL.md')?.content || '';
+
+    if (!providedMd.trim()) {
+      return { error: 'Skill 目录包必须包含非空的 SKILL.md 入口文档。' };
+    }
+
+    if (!fileMap.has('SKILL.md')) {
+      fileMap.set('SKILL.md', buildSkillFileEntry('SKILL.md', providedMd));
+    }
+
+    const frontmatter = parseSkillFrontmatter(providedMd);
+    const resolvedVersion = (input.version?.trim() || frontmatter.version || '1.0.0').slice(0, 32);
+    const resolvedSummary = (
+      input.summary?.trim() ||
+      frontmatter.description ||
+      `已导入的 ${id} Skill 目录包`
+    ).slice(0, 220);
+
+    const files = sortSkillFiles(Array.from(fileMap.values()));
+
+    const scriptFiles = files.filter((f) => f.category === 'script');
+    const cleanTool = (input.toolName || `skill_${id.replace(/-/g, '_')}__run`)
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '_');
+
+    const attachedTools: SkillAttachedTool[] =
+      input.toolName?.trim() || scriptFiles.length === 0
+        ? [
+            {
+              name: cleanTool,
+              estimatedTokens: 180,
+              description: `执行 ${id} 配套工具`,
+            },
+          ]
+        : scriptFiles.slice(0, 4).map((sf) => {
+            const base = sf.path
+              .replace(/^scripts\//, '')
+              .replace(/\.[^.]+$/, '')
+              .toLowerCase()
+              .replace(/[^a-z0-9_]/g, '_');
+            return {
+              name: `skill_${id.replace(/-/g, '_')}__${base || 'run'}`,
+              estimatedTokens: 160,
+              description: `执行目录脚本 ${sf.path}`,
+            };
+          });
+
+    const { estimatedTokens, tokenBreakdown } = computeSkillTokenMetrics(
+      providedMd,
       attachedTools,
-    });
+      files
+    );
+    const fingerprint = computeSkillBundleFingerprint(id, resolvedVersion, files, attachedTools);
 
     const newSkill: DualLayerSkill = {
       id,
-      version: input.version.trim() || '1.0.0',
-      summary: input.summary.trim(),
+      version: resolvedVersion,
+      summary: resolvedSummary,
       estimatedTokens,
       callCount: 0,
       successRate: '—',
       mounted: false,
       mountedBy: '',
       fingerprint,
-      skillMarkdown: input.skillMarkdown,
+      skillMarkdown: providedMd,
       attachedTools,
+      files,
+      sourceType: input.sourceType || (input.files && input.files.length > 1 ? 'folder-upload' : 'manual'),
+      sourcePath: input.sourcePath,
+      tokenBreakdown,
     };
 
     this.skills.unshift(newSkill);
     this.markDirty();
-    this.emitEvent('skill.created', { skillId: id });
+    this.emitEvent('skill.created', { skillId: id, fileCount: files.length });
     return { skill: newSkill };
   }
 
@@ -1354,6 +1841,7 @@ export class GatewayStore {
             'toolbox__inspect_schema',
             'toolbox__load_skill',
             'toolbox__unload_skill',
+            'toolbox__read_skill_file',
             'toolbox__search_knowledge',
           ],
           pinnedTools,
@@ -1388,12 +1876,71 @@ export class GatewayStore {
           ? {
               status: 'mounted',
               skillId: mounted.id,
+              bundleFingerprint: `sha256:${mounted.fingerprint}`,
               tokenCost: mounted.estimatedTokens,
+              tokenBreakdown: mounted.tokenBreakdown,
               injectedTools: mounted.attachedTools.map((t) => t.name),
+              availableFiles: mounted.files
+                .filter((f) => f.category !== 'entry' && f.injectToModel)
+                .map((f) => ({ path: f.path, category: f.category, sizeBytes: f.sizeBytes, tier: 'L3' })),
               skillMarkdownPreview: mounted.skillMarkdown.split('\n').slice(0, 4).join('\n'),
             }
           : { status: 'not_found', skillId: targetId },
       };
+    } else if (method === 'toolbox__read_skill_file') {
+      latencyMs = 5;
+      const targetId = String(params.argumentsObj?.skillId || '');
+      const rawFilePath = String(params.argumentsObj?.filePath || params.argumentsObj?.path || '');
+      const normalizedPath = normalizeSkillFilePath(rawFilePath);
+      const skill = this.skills.find((s) => s.id === targetId);
+      if (!normalizedPath) {
+        outcome = 'blocked';
+        responsePayload = {
+          jsonrpc: '2.0',
+          id: requestPayload.id,
+          error: {
+            code: -32602,
+            message: 'Invalid filePath: path traversal or absolute paths are forbidden.',
+          },
+        };
+      } else if (!skill) {
+        outcome = 'blocked';
+        responsePayload = {
+          jsonrpc: '2.0',
+          id: requestPayload.id,
+          error: {
+            code: -32602,
+            message: `Skill "${targetId}" not found.`,
+          },
+        };
+      } else {
+        const file = skill.files.find((f) => f.path === normalizedPath);
+        if (!file) {
+          outcome = 'blocked';
+          responsePayload = {
+            jsonrpc: '2.0',
+            id: requestPayload.id,
+            error: {
+              code: -32602,
+              message: `File "${normalizedPath}" not found inside skill bundle "${skill.id}".`,
+            },
+          };
+        } else {
+          responsePayload = {
+            jsonrpc: '2.0',
+            id: requestPayload.id,
+            result: {
+              skillId: skill.id,
+              path: file.path,
+              category: file.category,
+              tier: file.category === 'entry' ? 'L2' : file.injectToModel ? 'L3' : 'human-only',
+              sha256: `sha256:${file.sha256}`,
+              bundleFingerprint: `sha256:${skill.fingerprint}`,
+              content: this.redactSensitiveText(file.content),
+            },
+          };
+        }
+      }
     } else if (method === 'skill_owasp__scan_deps') {
       latencyMs = 38;
       const skill = this.skills.find((s) => s.id === 'security-owasp-auditor');

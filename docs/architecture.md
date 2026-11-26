@@ -133,9 +133,14 @@ flowchart LR
 
 ---
 
-## 5. 双层 Skill 动态热插拔运行时
+## 5. 目录包 Skill 与三级渐进式动态运行时
 
-传统跨 Agent 技能管理依赖在 `~/.claude/skills`、`~/.codex/` 等目录创建大量文件软链接，不仅容易冲突，而且无法在会话中途按需卸载释放 Token。Agent-Toolbox 将 Skill 抽象为受网关托管的**双层运行时单元**：
+传统跨 Agent 技能管理依赖在 `~/.claude/skills`、`~/.codex/` 等目录创建大量文件软链接，且单文件模型无法承载复杂脚本、参考规范与输出模板。Agent-Toolbox 遵循开放 Agent Skills 目录包规范，将每个 Skill 抽象为受网关托管的**目录包运行时单元**（`<skill-id>/` 包含必需的 `SKILL.md` 以及可选的 `scripts/`、`references/`、`templates/`、`assets/`、`README.md`），并采用 **L1 / L2 / L3 三级渐进式披露**与**整包 SHA-256 指纹锁**：
+
+- **L1 路由元数据（~60–100 Tokens）**：待命态仅向向量路由索引暴露 `name` 与 `description`。
+- **L2 入口指令 + 附带工具**：调用 `toolbox__load_skill` 挂载时注入 `SKILL.md` 正文与附带 MCP 工具，同时返回 L3 可用资源清单。
+- **L3 按需资源（0 预载 Tokens）**：`references/*`、`templates/*`、`scripts/*`、`assets/*` 在执行阶段由 Agent 按需调用 `toolbox__read_skill_file` 读取（受路径穿越校验与 Output Redaction 保护）；`README.md` 标记为仅人类阅读（`injectToModel: false`，恒占 0 Token）。
+- **整包 SHA-256 指纹**：按排序后的全部相对路径与单文件 SHA-256 联合计算，修改任何子脚本或模板均会触发指纹变化并同步写入 `toolbox.lock.json`。
 
 ```mermaid
 sequenceDiagram
@@ -143,21 +148,25 @@ sequenceDiagram
     participant Agent as AI Agent (如 Claude Code)
     participant GW as Agent-Toolbox Gateway
     participant Vec as Trinity Vector Engine
-    participant RT as Dual-Layer Skill Runtime
+    participant RT as Skill Bundle Runtime
     participant Bus as SSE Event Bus / Web UI
 
     Agent->>GW: tools/call("toolbox__discover_capabilities", { query: "扫描依赖安全漏洞" })
-    GW->>Vec: 语义检索 Lazy Tools 与 Standby Skills
+    GW->>Vec: 语义检索 Lazy Tools 与 Standby Skills (L1 元数据)
     Vec-->>GW: Top-K 命中: security-owasp-auditor (score: 0.92, Standby)
     GW-->>Agent: 返回候选摘要 (不暴露完整 Schema)
 
     Agent->>GW: tools/call("toolbox__load_skill", { skillId: "security-owasp-auditor" })
-    GW->>RT: 校验 Skill SHA-256 指纹并挂载
-    RT->>RT: 注册 Layer 2 工具 (skill_owasp__scan_deps, skill_owasp__report)
-    RT-->>GW: 返回 Layer 1 (SKILL.md 完整 SOP) + 注入工具列表
+    GW->>RT: 校验整包 SHA-256 指纹并挂载 L2
+    RT->>RT: 注册附带工具 (skill_owasp__scan_deps, skill_owasp__report)
+    RT-->>GW: 返回 SKILL.md + 注入工具 + availableFiles (L3 清单)
     GW--)Agent: 推送 notifications/tools/list_changed
     GW--)Bus: 广播 skill.mounted 事件 (Web UI 实时刷新为使用中)
-    GW-->>Agent: 返回挂载成功 + SKILL.md 上下文指令
+    GW-->>Agent: 返回挂载成功 + L2 指令 + L3 清单
+
+    Agent->>GW: tools/call("toolbox__read_skill_file", { skillId: "security-owasp-auditor", filePath: "references/owasp-top10-checklist.md" })
+    GW->>RT: 规范化校验路径并经 Output Redaction 脱敏读取 L3 资源
+    GW-->>Agent: 返回对应文件内容与文件级 SHA-256
 
     Agent->>GW: tools/call("skill_owasp__scan_deps", { target: "." })
     GW-->>Agent: 经 5 级中间件执行并返回扫描报告

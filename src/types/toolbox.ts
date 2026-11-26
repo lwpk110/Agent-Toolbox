@@ -5,12 +5,13 @@ export type TransportProtocol = 'stdio' | 'sse' | 'http';
 export type MiddlewareId = 'vault' | 'quarantine' | 'hitl' | 'redact' | 'budget';
 
 export interface HostProfile {
-  id: 'antigravity' | 'claude' | 'codex' | 'opencode';
+  id: string;
   name: string;
   latencyMs: number;
   online: boolean;
   scope: HostScope;
   configSnippet: string;
+  custom?: boolean;
 }
 
 export interface MiddlewareRule {
@@ -20,6 +21,16 @@ export interface MiddlewareRule {
   description: string;
   enabled: boolean;
   order: number;
+  config?: {
+    maxTokensPerTurn?: number;
+    customPatterns?: string[];
+  };
+}
+
+export interface McpToolAnnotations {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
 }
 
 export interface McpTool {
@@ -32,6 +43,27 @@ export interface McpTool {
   fingerprint: string;
   lockedFingerprint: string;
   readOnly?: boolean;
+  inputSchema?: Record<string, unknown>;
+  annotations?: McpToolAnnotations;
+}
+
+export interface McpResource {
+  uri: string;
+  name: string;
+  mimeType: string;
+  description: string;
+}
+
+export interface McpPromptArgument {
+  name: string;
+  required?: boolean;
+  description?: string;
+}
+
+export interface McpPrompt {
+  name: string;
+  description: string;
+  arguments?: McpPromptArgument[];
 }
 
 export interface QuarantineRecord {
@@ -41,6 +73,8 @@ export interface QuarantineRecord {
   actualHash: string;
   baselineDescription: string;
   mutatedDescription: string;
+  baselineSchema?: string;
+  mutatedSchema?: string;
   riskReason: string;
   detectedAt: string;
 }
@@ -50,17 +84,57 @@ export interface McpServer {
   name: string;
   protocol: TransportProtocol;
   commandOrUrl: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  enabled: boolean;
   latencyMs: number;
   state: ServerState;
   fingerprint: string;
   secretRef?: string;
   tools: McpTool[];
+  resources: McpResource[];
+  prompts: McpPrompt[];
 }
+
+export type SkillFileCategory = 'entry' | 'script' | 'reference' | 'template' | 'asset' | 'readme';
+export type SkillSourceType = 'builtin' | 'folder-upload' | 'workspace' | 'manual';
 
 export interface SkillAttachedTool {
   name: string;
   estimatedTokens: number;
   description: string;
+}
+
+export interface SkillFileEntry {
+  path: string;
+  category: SkillFileCategory;
+  content: string;
+  sizeBytes: number;
+  sha256: string;
+  injectToModel: boolean;
+}
+
+export interface SkillTokenBreakdown {
+  metadataTokens: number;
+  entryTokens: number;
+  toolsTokens: number;
+  onDemandFiles: number;
+  humanOnlyFiles: number;
+}
+
+export interface WorkspaceSkillCandidate {
+  relativeDir: string;
+  id: string;
+  version: string;
+  summary: string;
+  fileCount: number;
+  files: Array<{
+    path: string;
+    category: SkillFileCategory;
+    sizeBytes: number;
+  }>;
+  alreadyImported: boolean;
 }
 
 export interface DualLayerSkill {
@@ -75,6 +149,18 @@ export interface DualLayerSkill {
   fingerprint: string;
   skillMarkdown: string;
   attachedTools: SkillAttachedTool[];
+  files: SkillFileEntry[];
+  sourceType: SkillSourceType;
+  sourcePath?: string;
+  tokenBreakdown: SkillTokenBreakdown;
+}
+
+export interface KnowledgeChunk {
+  id: string;
+  index: number;
+  heading: string;
+  content: string;
+  tokens: number;
 }
 
 export interface KnowledgeDoc {
@@ -83,6 +169,9 @@ export interface KnowledgeDoc {
   chunkCount: number;
   embeddingDim: number;
   contentPreview: string;
+  content: string;
+  chunks: KnowledgeChunk[];
+  sourceType?: 'builtin' | 'upload' | 'workspace' | 'manual';
   indexedAt: string;
 }
 
@@ -91,6 +180,7 @@ export interface SharedMemory {
   host: string;
   topic: string;
   content: string;
+  scope?: 'global' | 'project';
   createdAt: string;
 }
 
@@ -110,6 +200,7 @@ export interface VaultEntry {
   maskedValue: string;
   configured: boolean;
   updatedAt: string;
+  referencedBy?: string[];
 }
 
 export interface HitlApproval {
@@ -154,6 +245,7 @@ export interface SyncStatus {
   ahead: number;
   pushed: boolean;
   lastSyncedAt: string | null;
+  lastCommitMessage?: string;
 }
 
 export interface SyncPreflightCheck {
@@ -163,19 +255,27 @@ export interface SyncPreflightCheck {
   detail: string;
 }
 
+export interface SyncDiffLine {
+  kind: 'add' | 'del' | 'ctx';
+  text: string;
+}
+
 export interface SyncPreflightResult {
   ready: boolean;
   blockingReason: string;
   checks: SyncPreflightCheck[];
   manifestJson: string;
   lockfileJson: string;
+  diffLines: SyncDiffLine[];
 }
 
 export interface TrinitySearchResult {
   query: string;
   latencyMs: number;
   docs: Array<{
+    docId?: string;
     filePath: string;
+    heading?: string;
     excerpt: string;
     score: string;
     latencyMs: number;

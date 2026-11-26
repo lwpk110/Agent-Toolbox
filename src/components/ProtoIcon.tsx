@@ -23,6 +23,9 @@ export type ProtoIconName =
   | 'key'
   | 'download'
   | 'inbox'
+  | 'folder'
+  | 'folderOpen'
+  | 'file'
   | 'dot';
 
 const ICON_PATHS: Record<Exclude<ProtoIconName, 'dot'>, ReactNode> = {
@@ -124,6 +127,21 @@ const ICON_PATHS: Record<Exclude<ProtoIconName, 'dot'>, ReactNode> = {
     <>
       <path d="M3 13h5l2 3h4l2-3h5" />
       <path d="M5 5h14l2 8v6H3v-6z" />
+    </>
+  ),
+  folder: (
+    <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h8.5A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z" />
+  ),
+  folderOpen: (
+    <>
+      <path d="M3 6.5A1.5 1.5 0 0 1 4.5 5H9l2 2h7.5A1.5 1.5 0 0 1 20 8.5V10H5.5L3 17.5z" />
+      <path d="M3 17.5 5.2 10H21l-2.2 8.2a1 1 0 0 1-1 .8H4.5A1.5 1.5 0 0 1 3 17.5z" />
+    </>
+  ),
+  file: (
+    <>
+      <path d="M6 3h8l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z" />
+      <path d="M14 3v5h5" />
     </>
   ),
 };

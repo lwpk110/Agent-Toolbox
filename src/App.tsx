@@ -4,6 +4,7 @@ import type {
   GatewayStateSnapshot,
   HostScope,
   MiddlewareRule,
+  SkillSourceType,
   TransportProtocol,
 } from './types/toolbox';
 import { api } from './lib/api';
@@ -116,6 +117,8 @@ export default function App() {
       'quarantine.resolved',
       'skill.mounted',
       'skill.unmounted',
+      'skill.created',
+      'skill.updated',
       'hitl.pending',
       'hitl.resolved',
       'vault.updated',
@@ -247,14 +250,44 @@ export default function App() {
 
   const handleCreateSkill = async (payload: {
     id: string;
-    version: string;
-    summary: string;
-    skillMarkdown: string;
+    version?: string;
+    summary?: string;
+    skillMarkdown?: string;
     toolName?: string;
+    files?: Array<{ path: string; content: string }>;
+    sourceType?: SkillSourceType;
+    sourcePath?: string;
   }) => {
-    const next = await api.createSkill(payload);
+    const res = await api.createSkill(payload);
+    setState(res.data);
+    const count = payload.files?.length || 1;
+    showToast(`已导入 Skill 目录包：${res.skillId || payload.id}（${count} 个文件）`);
+    return res.skillId || payload.id;
+  };
+
+  const handleImportWorkspaceSkill = async (payload: {
+    relativeDir: string;
+    id?: string;
+    version?: string;
+    summary?: string;
+  }) => {
+    const res = await api.importWorkspaceSkillDir(payload);
+    setState(res.data);
+    const importedId = res.skillId || payload.id || payload.relativeDir;
+    showToast(`已从工作区导入 Skill：${importedId}`);
+    return importedId;
+  };
+
+  const handleSaveSkillFile = async (skillId: string, filePath: string, content: string) => {
+    const next = await api.upsertSkillFile(skillId, filePath, content);
     setState(next);
-    showToast(`已导入 Skill：${payload.id}`);
+    showToast(`已保存 ${filePath} 并重算目录包指纹`);
+  };
+
+  const handleDeleteSkillFile = async (skillId: string, filePath: string) => {
+    const next = await api.deleteSkillFile(skillId, filePath);
+    setState(next);
+    showToast(`已移除 ${filePath} 并重算目录包指纹`);
   };
 
   const handleAddDoc = async (filePath: string, content: string) => {
@@ -454,6 +487,9 @@ export default function App() {
               onUnmountSkill={handleUnmountSkill}
               onSaveMarkdown={handleSaveSkillMd}
               onCreateSkill={handleCreateSkill}
+              onImportWorkspaceSkill={handleImportWorkspaceSkill}
+              onSaveSkillFile={handleSaveSkillFile}
+              onDeleteSkillFile={handleDeleteSkillFile}
             />
           ) : view === 'kb' ? (
             <KnowledgeView

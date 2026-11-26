@@ -9,6 +9,7 @@ interface ModalDialogProps {
   danger?: boolean;
   hideCancel?: boolean;
   busy?: boolean;
+  wide?: boolean;
   onConfirm?: () => void;
   onClose: () => void;
 }
@@ -22,6 +23,7 @@ export function ModalDialog({
   danger = false,
   hideCancel = false,
   busy = false,
+  wide = false,
   onConfirm,
   onClose,
 }: ModalDialogProps) {
@@ -61,7 +63,7 @@ export function ModalDialog({
   return (
     <dialog
       ref={dlgRef}
-      className="dlg"
+      className={wide ? 'dlg dlg-wide' : 'dlg'}
       aria-labelledby="dlgTitle"
       onCancel={(e) => {
         e.preventDefault();

@@ -174,13 +174,14 @@ export interface ToolboxLockfile {
   - SSE 事件流：`GET http://127.0.0.1:3000/api/mcp/sse`
   - JSON-RPC 上行：`POST http://127.0.0.1:3000/api/mcp/messages`
 
-### 3.2 内置 5 大核心元工具契约
+### 3.2 内置 6 大核心元工具契约
 
 | 元工具名 | 输入参数（`arguments`） | 核心返回结构 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `toolbox__discover_capabilities` | `{ query: string, topK?: number }` | `{ matches: Array<{ id, kind, score, mode, summary }> }` | 语义发现 Lazy 工具与 Standby Skill，不膨胀上下文 |
+| `toolbox__discover_capabilities` | `{ query: string, topK?: number }` | `{ matches: Array<{ id, kind, score, mode, summary }> }` | 语义发现 Lazy 工具与 Standby Skill（L1 元数据），不膨胀上下文 |
 | `toolbox__inspect_schema` | `{ toolName: string }` | `{ name, description, inputSchema, fingerprint, hitl }` | 三段式工作流第 2 步：按需查看单个 Lazy 工具完整 Schema |
-| `toolbox__load_skill` | `{ skillId: string }` | `{ status: "mounted", injectedTools: string[], skillMarkdown: string, tokenCost: number }` | 热挂载双层 Skill，同时推送 `notifications/tools/list_changed` |
+| `toolbox__load_skill` | `{ skillId: string }` | `{ status: "mounted", bundleFingerprint, injectedTools, tokenBreakdown, availableFiles, skillMarkdownPreview }` | 热挂载目录包 Skill（L2），返回 L3 可按需读取资源清单并推送 `notifications/tools/list_changed` |
+| `toolbox__read_skill_file` | `{ skillId: string, filePath: string }` | `{ skillId, path, category, tier, sha256, bundleFingerprint, content }` | L3 渐进式披露：按需读取 Skill 目录内 `references/*`、`templates/*`、`scripts/*` 等文件，内置路径穿越校验与 Output Redaction 脱敏 |
 | `toolbox__unload_skill` | `{ skillId: string }` | `{ status: "unmounted", freedTokens: number }` | 动态卸载 Skill 并释放上下文 Token，推送 `list_changed` |
 | `toolbox__search_knowledge` | `{ query: string, includeMemory?: boolean, includeRouting?: boolean }` | `{ docs: RagHit[], memories: MemoryHit[], routing: SkillSuggestion[], latencyMs: number }` | 一库三搜统一语义检索；配套 `toolbox__remember` 写入共享记忆 |
 
@@ -248,8 +249,10 @@ sequenceDiagram
 | **工具策略** | `PATCH /api/v1/tools/:toolName` | `{ "mode"?: "pinned"\|"lazy", "hitl"?: boolean }` | 切换工具常驻/懒加载或 HITL 审批锁，重算 Token 节省率 |
 | **隔离处置** | `POST /api/v1/quarantine/:serverId/resolve` | `{ "action": "rollback" \| "trust" }` | 回滚至已签名基准版本，或重新签名更新 `toolbox.lock.json` |
 | **演示篡改** | `POST /api/v1/quarantine/simulate` | `{ "serverId"?: "scraper" }` | 模拟下游 Rug-Pull 描述篡改以验证防投毒闭环 |
-| **Skill 管理** | `POST /api/v1/skills` / `PUT /api/v1/skills/:id` | `{ id, version, summary, skillMarkdown, attachedTools }` | 导入新 Skill 或保存编辑后的 `SKILL.md` 并重算 SHA-256 指纹 |
-| **热插拔** | `POST /api/v1/skills/:id/mount` / `unmount` | `{ "host"?: string }` | 热挂载或卸载双层 Skill 并广播 `list_changed` |
+| **Skill 目录导入** | `GET /api/v1/skills/workspace-candidates` / `POST /api/v1/skills/import-directory` | `{ relativeDir, id?, version?, summary? }` | 安全扫描工作区 `skills/` 目录候选并一键导入整套 Skill 目录包（含 symlink 越界防护） |
+| **Skill 管理** | `POST /api/v1/skills` / `PUT /api/v1/skills/:id` | `{ id, version?, summary?, skillMarkdown?, files?, sourceType? }` | 支持本地目录上传（`files[]`）或手动创建目录包，自动解析 Frontmatter 并计算整包 SHA-256 指纹 |
+| **Skill 文件管理** | `PUT /api/v1/skills/:id/files` / `DELETE /api/v1/skills/:id/files?path=...` | `{ path, content }` | 在线新增、修改或删除 Skill 目录包内子文件（禁止删除 `SKILL.md`），即时重算整包 SHA-256 指纹 |
+| **热插拔** | `POST /api/v1/skills/:id/mount` / `unmount` | `{ "host"?: string }` | 热挂载或卸载目录包 Skill 并广播 `list_changed` |
 | **统一检索** | `POST /api/v1/kb/search` | `{ "query": string }` | 执行一库三搜，返回 `docs`、`memories`、`routing` 及耗时 |
 | **知识/记忆** | `POST /api/v1/kb/docs` / `POST /api/v1/kb/memories` / `DELETE /api/v1/kb/memories/:id` | 文档标题/正文或记忆对象 | 文档自动分块向量化入库、增删跨宿主记忆 |
 | **索引重建** | `POST /api/v1/kb/rebuild` | 无 | 触发双缓冲向量索引重建并返回最新健康报告 |

@@ -3,8 +3,10 @@ import type {
   GatewayStateSnapshot,
   HostScope,
   MiddlewareId,
+  SkillSourceType,
   TransportProtocol,
   TrinitySearchResult,
+  WorkspaceSkillCandidate,
 } from '../types/toolbox';
 import type { DocDetail, DocMeta } from '../types/docs';
 
@@ -101,15 +103,54 @@ export const api = {
 
   createSkill: (payload: {
     id: string;
-    version: string;
-    summary: string;
-    skillMarkdown: string;
+    version?: string;
+    summary?: string;
+    skillMarkdown?: string;
     toolName?: string;
+    files?: Array<{ path: string; content: string }>;
+    sourceType?: SkillSourceType;
+    sourcePath?: string;
   }) =>
-    requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/skills', {
+    requestJson<{ ok: true; skillId?: string; data: GatewayStateSnapshot }>('/api/v1/skills', {
       method: 'POST',
       body: JSON.stringify(payload),
-    }).then((r) => r.data),
+    }),
+
+  getWorkspaceSkillCandidates: () =>
+    requestJson<{ ok: true; data: WorkspaceSkillCandidate[] }>('/api/v1/skills/workspace-candidates').then(
+      (r) => r.data
+    ),
+
+  importWorkspaceSkillDir: (payload: {
+    relativeDir: string;
+    id?: string;
+    version?: string;
+    summary?: string;
+  }) =>
+    requestJson<{ ok: true; skillId?: string; data: GatewayStateSnapshot }>(
+      '/api/v1/skills/import-directory',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }
+    ),
+
+  upsertSkillFile: (skillId: string, path: string, content: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(
+      `/api/v1/skills/${encodeURIComponent(skillId)}/files`,
+      {
+        method: 'PUT',
+        body: JSON.stringify({ path, content }),
+      }
+    ).then((r) => r.data),
+
+  deleteSkillFile: (skillId: string, path: string) =>
+    requestJson<{ ok: true; data: GatewayStateSnapshot }>(
+      `/api/v1/skills/${encodeURIComponent(skillId)}/files?path=${encodeURIComponent(path)}`,
+      {
+        method: 'DELETE',
+      }
+    ).then((r) => r.data),
 
   searchKnowledge: (query: string) =>
     requestJson<{ ok: true; data: TrinitySearchResult }>('/api/v1/kb/search', {

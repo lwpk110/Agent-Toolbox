@@ -2,17 +2,30 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import type { DocCategory, DocMeta } from './src/types/docs';
-import type { ExposureMode, HostScope, MiddlewareId, TransportProtocol } from './src/types/toolbox';
-import { gatewayStore } from './src/server/gatewayStore';
+import type {
+  ExposureMode,
+  HostScope,
+  MiddlewareId,
+  SkillSourceType,
+  TransportProtocol,
+  WorkspaceSkillCandidate,
+} from './src/types/toolbox';
+import {
+  classifySkillFile,
+  gatewayStore,
+  normalizeSkillFilePath,
+  parseSkillFrontmatter,
+} from './src/server/gatewayStore';
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const ROOT_DIR = process.cwd();
 const DOCS_DIR = path.resolve(ROOT_DIR, 'docs');
+const SKILLS_DIR = path.resolve(ROOT_DIR, 'skills');
 const PROTYPE_DIR = path.resolve(ROOT_DIR, 'protype');
 const DIST_DIR = path.resolve(ROOT_DIR, 'dist');
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '4mb' }));
 
 interface RegistryEntry {
   slug: string;
@@ -135,6 +148,143 @@ function sendErr(res: express.Response, status: number, code: string, message: s
     ok: false,
     error: { code, message },
   });
+}
+
+const IGNORED_SKILL_DIRS = new Set(['node_modules', '.git', 'dist', 'build', 'system_skills']);
+const MAX_WORKSPACE_FILE_BYTES = 200 * 1024;
+const MAX_WORKSPACE_FILES = 60;
+
+function readWorkspaceSkillDirectory(relativeDir: string): {
+  relativeDir?: string;
+  files?: Array<{ path: string; content: string; sizeBytes: number }>;
+  error?: string;
+} {
+  const cleanRel = normalizeSkillFilePath(relativeDir);
+  if (!cleanRel) {
+    return { error: '目录路径非法，仅允许 skills/ 下的相对路径。' };
+  }
+  const segs = cleanRel.split('/');
+  if (segs.some((s) => s.startsWith('.') || IGNORED_SKILL_DIRS.has(s))) {
+    return { error: '禁止导入受保护或隐藏目录。' };
+  }
+  if (!fs.existsSync(SKILLS_DIR)) {
+    return { error: '工作区不存在 skills/ 目录。' };
+  }
+
+  const realSkillsRoot = fs.realpathSync(SKILLS_DIR);
+  const candidateAbs = path.resolve(SKILLS_DIR, cleanRel);
+  if (!candidateAbs.startsWith(SKILLS_DIR + path.sep) || !fs.existsSync(candidateAbs)) {
+    return { error: `未找到工作区目录 skills/${cleanRel}。` };
+  }
+
+  const realTargetDir = fs.realpathSync(candidateAbs);
+  if (!realTargetDir.startsWith(realSkillsRoot + path.sep) || !fs.statSync(realTargetDir).isDirectory()) {
+    return { error: '目标目录超出允许的工作区范围。' };
+  }
+
+  const collected: Array<{ path: string; content: string; sizeBytes: number }> = [];
+
+  const walk = (currentDir: string, relPrefix: string, depth: number) => {
+    if (depth > 4 || collected.length >= MAX_WORKSPACE_FILES) return;
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (collected.length >= MAX_WORKSPACE_FILES) break;
+      if (entry.name.startsWith('.') || IGNORED_SKILL_DIRS.has(entry.name)) continue;
+
+      const absChild = path.join(currentDir, entry.name);
+      let realChild: string;
+      try {
+        realChild = fs.realpathSync(absChild);
+      } catch {
+        continue;
+      }
+      if (!realChild.startsWith(realTargetDir + path.sep)) continue;
+
+      const relChild = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      const stat = fs.statSync(realChild);
+      if (stat.isDirectory()) {
+        walk(realChild, relChild, depth + 1);
+      } else if (stat.isFile()) {
+        if (stat.size > MAX_WORKSPACE_FILE_BYTES) continue;
+        const buf = fs.readFileSync(realChild);
+        if (buf.includes(0)) continue; // Skip binary files
+        const normalizedRel = normalizeSkillFilePath(relChild);
+        if (!normalizedRel) continue;
+        collected.push({
+          path: normalizedRel,
+          content: buf.toString('utf8'),
+          sizeBytes: stat.size,
+        });
+      }
+    }
+  };
+
+  walk(realTargetDir, '', 0);
+  if (!collected.some((f) => f.path === 'SKILL.md')) {
+    return { error: `目录 skills/${cleanRel} 缺少必需的 SKILL.md 入口文件。` };
+  }
+
+  return { relativeDir: cleanRel, files: collected };
+}
+
+function listWorkspaceSkillCandidates(): WorkspaceSkillCandidate[] {
+  if (!fs.existsSync(SKILLS_DIR)) return [];
+  const realSkillsRoot = fs.realpathSync(SKILLS_DIR);
+  const importedIds = new Set(gatewayStore.getSnapshot().skills.map((s) => s.id));
+  const candidateRelDirs: string[] = [];
+
+  const scan = (dir: string, relPrefix: string, depth: number) => {
+    if (depth > 2) return;
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith('.') || IGNORED_SKILL_DIRS.has(entry.name)) continue;
+      const abs = path.join(dir, entry.name);
+      let realAbs: string;
+      try {
+        realAbs = fs.realpathSync(abs);
+      } catch {
+        continue;
+      }
+      if (!realAbs.startsWith(realSkillsRoot + path.sep)) continue;
+      const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      if (fs.existsSync(path.join(realAbs, 'SKILL.md'))) {
+        candidateRelDirs.push(rel);
+      } else {
+        scan(realAbs, rel, depth + 1);
+      }
+    }
+  };
+
+  scan(realSkillsRoot, '', 0);
+
+  const candidates: WorkspaceSkillCandidate[] = [];
+  for (const relDir of candidateRelDirs.sort()) {
+    const read = readWorkspaceSkillDirectory(relDir);
+    if (!read.files) continue;
+    const entryFile = read.files.find((f) => f.path === 'SKILL.md');
+    const fm = entryFile ? parseSkillFrontmatter(entryFile.content) : {};
+    const rawId = (fm.name || relDir.split('/').pop() || relDir)
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const id = rawId || 'custom-skill';
+    candidates.push({
+      relativeDir: relDir,
+      id,
+      version: fm.version || '1.0.0',
+      summary: (fm.description || `工作区目录 skills/${relDir}`).slice(0, 180),
+      fileCount: read.files.length,
+      files: read.files.map((f) => ({
+        path: f.path,
+        category: classifySkillFile(f.path).category,
+        sizeBytes: f.sizeBytes,
+      })),
+      alreadyImported: importedIds.has(id),
+    });
+  }
+
+  return candidates;
 }
 
 /* ---------- Health ---------- */
@@ -286,24 +436,82 @@ app.post('/api/v1/quarantine/simulate', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
-app.post('/api/v1/skills', (req, res) => {
-  const { id, version, summary, skillMarkdown, toolName } = req.body || {};
-  if (typeof id !== 'string' || typeof summary !== 'string' || typeof skillMarkdown !== 'string') {
-    sendErr(res, 400, 'INVALID_SKILL', '请完整填写 Skill 名称、用途简介与 SKILL.md 内容。');
+app.get('/api/v1/skills/workspace-candidates', (_req, res) => {
+  sendOk(res, listWorkspaceSkillCandidates());
+});
+
+app.post('/api/v1/skills/import-directory', (req, res) => {
+  const { relativeDir, id, version, summary, toolName } = req.body || {};
+  if (typeof relativeDir !== 'string' || !relativeDir.trim()) {
+    sendErr(res, 400, 'INVALID_DIRECTORY', '请指定要导入的工作区 Skill 目录路径。');
     return;
   }
+  const read = readWorkspaceSkillDirectory(relativeDir);
+  if (read.error || !read.files || !read.relativeDir) {
+    sendErr(res, 400, 'DIRECTORY_READ_FAILED', read.error || '无法读取工作区 Skill 目录。');
+    return;
+  }
+  const entryFile = read.files.find((f) => f.path === 'SKILL.md');
+  const fm = entryFile ? parseSkillFrontmatter(entryFile.content) : {};
+  const derivedId = (
+    (typeof id === 'string' && id.trim()) ||
+    fm.name ||
+    read.relativeDir.split('/').pop() ||
+    'workspace-skill'
+  )
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  const result = gatewayStore.createSkill({
+    id: derivedId,
+    version: typeof version === 'string' && version.trim() ? version : fm.version,
+    summary: typeof summary === 'string' && summary.trim() ? summary : fm.description,
+    skillMarkdown: entryFile?.content,
+    toolName: typeof toolName === 'string' ? toolName : undefined,
+    files: read.files.map((f) => ({ path: f.path, content: f.content })),
+    sourceType: 'workspace',
+    sourcePath: `skills/${read.relativeDir}`,
+  });
+  if (result.error) {
+    sendErr(res, 400, 'SKILL_IMPORT_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), { skillId: result.skill?.id });
+});
+
+app.post('/api/v1/skills', (req, res) => {
+  const { id, version, summary, skillMarkdown, toolName, files, sourceType, sourcePath } = req.body || {};
+  const hasFilesArray = Array.isArray(files) && files.length > 0;
+  if (typeof id !== 'string' || !id.trim()) {
+    sendErr(res, 400, 'INVALID_SKILL', '请填写 Skill 标识名称。');
+    return;
+  }
+  if (!hasFilesArray && (typeof skillMarkdown !== 'string' || !skillMarkdown.trim())) {
+    sendErr(res, 400, 'INVALID_SKILL', '请提供 SKILL.md 正文或包含 SKILL.md 的目录文件列表。');
+    return;
+  }
+  const allowedSourceTypes: SkillSourceType[] = ['builtin', 'folder-upload', 'workspace', 'manual'];
+  const safeSourceType: SkillSourceType | undefined =
+    typeof sourceType === 'string' && allowedSourceTypes.includes(sourceType as SkillSourceType)
+      ? (sourceType as SkillSourceType)
+      : undefined;
+
   const result = gatewayStore.createSkill({
     id,
-    version: typeof version === 'string' ? version : '1.0.0',
-    summary,
-    skillMarkdown,
+    version: typeof version === 'string' ? version : undefined,
+    summary: typeof summary === 'string' ? summary : undefined,
+    skillMarkdown: typeof skillMarkdown === 'string' ? skillMarkdown : undefined,
     toolName: typeof toolName === 'string' ? toolName : undefined,
+    files: hasFilesArray ? files : undefined,
+    sourceType: safeSourceType,
+    sourcePath: typeof sourcePath === 'string' ? sourcePath : undefined,
   });
   if (result.error) {
     sendErr(res, 400, 'SKILL_CREATE_FAILED', result.error);
     return;
   }
-  sendOk(res, gatewayStore.getSnapshot());
+  sendOk(res, gatewayStore.getSnapshot(), { skillId: result.skill?.id });
 });
 
 app.put('/api/v1/skills/:id', (req, res) => {
@@ -315,6 +523,42 @@ app.put('/api/v1/skills/:id', (req, res) => {
   const updated = gatewayStore.updateSkillMarkdown(req.params.id, markdown);
   if (!updated) {
     sendErr(res, 404, 'SKILL_NOT_FOUND', '未找到指定 Skill。');
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot());
+});
+
+app.put('/api/v1/skills/:id/files', (req, res) => {
+  const filePath = req.body?.path;
+  const content = req.body?.content;
+  if (typeof filePath !== 'string' || !filePath.trim() || typeof content !== 'string') {
+    sendErr(res, 400, 'INVALID_FILE_PAYLOAD', '请提供有效的文件相对路径与文本内容。');
+    return;
+  }
+  const result = gatewayStore.upsertSkillFile(req.params.id, filePath, content);
+  if (result.error) {
+    const status = result.error.includes('未找到指定 Skill') ? 404 : 400;
+    sendErr(res, status, 'SKILL_FILE_UPDATE_FAILED', result.error);
+    return;
+  }
+  sendOk(res, gatewayStore.getSnapshot(), { file: result.file });
+});
+
+app.delete('/api/v1/skills/:id/files', (req, res) => {
+  const rawPath =
+    typeof req.query.path === 'string'
+      ? req.query.path
+      : typeof req.body?.path === 'string'
+      ? req.body.path
+      : '';
+  if (!rawPath.trim()) {
+    sendErr(res, 400, 'INVALID_FILE_PATH', '请指定要删除的文件相对路径。');
+    return;
+  }
+  const result = gatewayStore.deleteSkillFile(req.params.id, rawPath);
+  if (result.error) {
+    const status = result.error.includes('未找到') ? 404 : 400;
+    sendErr(res, status, 'SKILL_FILE_DELETE_FAILED', result.error);
     return;
   }
   sendOk(res, gatewayStore.getSnapshot());
