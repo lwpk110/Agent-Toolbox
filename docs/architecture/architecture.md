@@ -4,6 +4,8 @@
 
 控制台当前采用 Express 与内存网关。代码入口及已接通的接口见[当前实现](../guides/current-implementation.md)。
 
+业务模块的数据归属、职责和迁移顺序见[功能模块与领域模型](./domain-model.md)。
+
 ---
 
 ## 1. 总体系统架构（Hub-and-Spoke 多路复用）

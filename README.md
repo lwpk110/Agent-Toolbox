@@ -45,5 +45,6 @@ bun run start
 ## 文档
 
 - 查看六个模块的实现范围、API 入口和运行数据生命周期。[当前实现](./docs/guides/current-implementation.md)
+- 查阅模块职责、领域对象和业务规则。[功能模块与领域模型](./docs/architecture/domain-model.md) · [领域术语表](./GLOSSARY.md)
 - 按需求、架构、协议和实施计划查阅工程文档。[工程文档中心](./docs/README.md)
 - 查看交互原型、线框与样式交接材料。[原型目录](./prototype/README.md)

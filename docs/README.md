@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `guides/` 开发指南 | 当前实现、开发流程和操作指南 | [当前实现](./guides/current-implementation.md) |
 | `product/` 产品与规划 | 需求、验收、调研和实施路线 | [产品需求](./product/prd.md)、[可行性报告](./product/feasibility_report.md)、[实施计划](./product/implementation_plan.md) |
-| `architecture/` 系统架构 | 系统设计、模块和数据流 | [系统架构](./architecture/architecture.md) |
+| `architecture/` 系统架构 | 系统设计、模块和数据流 | [系统架构](./architecture/architecture.md)、[功能模块与领域模型](./architecture/domain-model.md) |
 | `adr/` 架构决策记录 | 每项决策独立成文，按编号查阅 | [ADR 索引](./adr/README.md) |
 | `reference/` 协议与安全 | API 契约、协议规范、安全和同步设计 | [API 与 MCP 协议设计](./reference/api-mcp-spec.md)、[安全与 GitOps 设计](./reference/security-gitops.md) |
 
