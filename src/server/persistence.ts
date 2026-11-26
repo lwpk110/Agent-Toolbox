@@ -33,29 +33,33 @@ export class GatewayPersistence {
     registerSignalHandlers();
   }
 
+  private archiveInvalidState(reason: string): void {
+    const corruptFile = `${this.dataFile}.corrupt-${Date.now()}`;
+    try {
+      fs.renameSync(this.dataFile, corruptFile);
+      console.warn(`[gateway-persistence] ${reason} in ${this.dataFile} moved to ${corruptFile}; using seed data`);
+    } catch (renameError) {
+      throw new Error(`[gateway-persistence] Could not archive invalid state ${this.dataFile}; refusing to overwrite it: ${String(renameError)}`);
+    }
+  }
+
   load(): PersistedGatewayState | undefined {
     if (!fs.existsSync(this.dataFile)) return undefined;
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(this.dataFile, 'utf8'));
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        console.warn(`[gateway-persistence] Invalid state in ${this.dataFile}; using seed data`);
+        this.archiveInvalidState('Invalid state');
         return undefined;
       }
       const record = parsed as Record<string, unknown>;
       if (record.schemaVersion !== PERSISTENCE_SCHEMA_VERSION) {
-        console.warn(`[gateway-persistence] Unsupported schema version in ${this.dataFile}; using seed data`);
+        this.archiveInvalidState('Unsupported schema version');
         return undefined;
       }
       return record;
     } catch (error) {
       if (error instanceof SyntaxError) {
-        const corruptFile = `${this.dataFile}.corrupt-${Date.now()}`;
-        try {
-          fs.renameSync(this.dataFile, corruptFile);
-          console.warn(`[gateway-persistence] Invalid JSON moved to ${corruptFile}; using seed data`);
-        } catch (renameError) {
-          throw new Error(`[gateway-persistence] Could not archive invalid state ${this.dataFile}; refusing to overwrite it: ${String(renameError)}`);
-        }
+        this.archiveInvalidState('Invalid JSON');
         return undefined;
       }
       console.warn(`[gateway-persistence] Could not read ${this.dataFile}; using seed data: ${String(error)}`);

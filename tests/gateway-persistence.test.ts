@@ -57,6 +57,7 @@ describe('GatewayStore persistence', () => {
 
     fs.writeFileSync(dataFile, JSON.stringify({ schemaVersion: 999, hosts: [] }));
     expect(() => new GatewayStore({ dataFile })).not.toThrow();
+    expect(fs.readdirSync(path.dirname(dataFile)).filter((name) => /^gateway-state\.json\.corrupt-\d+$/.test(name)).length).toBe(2);
     await waitForWrite();
     expect(new GatewayStore({ dataFile }).getSnapshot().hosts.length).toBeGreaterThan(0);
   });
