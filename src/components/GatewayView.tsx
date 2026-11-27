@@ -6,7 +6,7 @@ import type {
   TransportProtocol,
 } from '../types/toolbox';
 import { ProtoIcon } from './ProtoIcon';
-import { ProtoMore, ProtoSeg, ProtoStatus, ProtoSwitch, ProtoTip } from './ProtoPrimitives';
+import { DataOriginTag, ProtoMore, ProtoSeg, ProtoStatus, ProtoSwitch, ProtoTip } from './ProtoPrimitives';
 import { ModalDialog } from './ModalDialog';
 
 const SAMPLE_MCP_JSON = `{
@@ -403,7 +403,7 @@ export function GatewayView({
             <b>没有需要审查的服务</b>
             <span>所有 MCP 工具描述与参数 Schema 都与指纹锁一致。</span>
           </div>
-          <button
+          {state.visibility.showDemo && <button
             type="button"
             className="btn sm"
             onClick={async () => {
@@ -412,7 +412,7 @@ export function GatewayView({
             }}
           >
             <span>模拟一次篡改（演示）</span>
-          </button>
+          </button>}
         </div>
       )}
 
@@ -537,6 +537,7 @@ export function GatewayView({
                               <ProtoIcon name={isOpen ? 'down' : 'chev'} />
                               {s.name}
                             </button>
+                            <DataOriginTag origin={s.origin} />
                             <span className="tag mono">{s.protocol}</span>
                             {s.secretRef && <span className="tag info mono">{s.secretRef}</span>}
                           </div>

@@ -93,7 +93,11 @@ test('Codex stdio-proxy + single daemon + real downstream MCP server end-to-end'
   const testPort = 3299;
   const tmpToolboxHome = fs.mkdtempSync(path.join(os.tmpdir(), 'toolbox-daemon-test-'));
   const prevToolboxHome = process.env.TOOLBOX_HOME;
+  const prevDataFile = process.env.TOOLBOX_DATA_FILE;
+  const prevLockFile = process.env.TOOLBOX_LOCK_FILE;
   process.env.TOOLBOX_HOME = tmpToolboxHome;
+  process.env.TOOLBOX_DATA_FILE = path.join(tmpToolboxHome, 'gateway-state.json');
+  process.env.TOOLBOX_LOCK_FILE = path.join(tmpToolboxHome, 'toolbox.lock.json');
 
   // Tiny real downstream stdio MCP server for end-to-end proxy verification
   const mockDownstreamPath = path.join(tmpToolboxHome, 'echo-mcp.mjs');
@@ -293,6 +297,10 @@ rl.on('line', (line) => {
     }
     if (prevToolboxHome === undefined) delete process.env.TOOLBOX_HOME;
     else process.env.TOOLBOX_HOME = prevToolboxHome;
+    if (prevDataFile === undefined) delete process.env.TOOLBOX_DATA_FILE;
+    else process.env.TOOLBOX_DATA_FILE = prevDataFile;
+    if (prevLockFile === undefined) delete process.env.TOOLBOX_LOCK_FILE;
+    else process.env.TOOLBOX_LOCK_FILE = prevLockFile;
     fs.rmSync(tmpToolboxHome, { recursive: true, force: true });
   }
 });

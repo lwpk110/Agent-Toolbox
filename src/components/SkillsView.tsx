@@ -8,7 +8,7 @@ import type {
 } from '../types/toolbox';
 import { api } from '../lib/api';
 import { ProtoIcon } from './ProtoIcon';
-import { ProtoSeg, ProtoStatus, ProtoTip } from './ProtoPrimitives';
+import { DataOriginTag, ProtoSeg, ProtoStatus, ProtoTip } from './ProtoPrimitives';
 import { ModalDialog } from './ModalDialog';
 
 interface SkillsViewProps {
@@ -716,7 +716,7 @@ export function SkillsView({
                 }}
               >
                 <div className="od-row" style={{ justifyContent: 'space-between' }}>
-                  <span className="nm">{s.id}</span>
+                  <span className="od-row"><span className="nm">{s.id}</span><DataOriginTag origin={s.origin} /></span>
                   <span className="small muted mono">{s.files.length} 文件</span>
                 </div>
                 <span className="ds">{s.summary}</span>

@@ -3,8 +3,14 @@ export type ExposureMode = 'pinned' | 'lazy';
 export type ServerState = 'ok' | 'quarantined' | 'degraded' | 'offline';
 export type TransportProtocol = 'stdio' | 'sse' | 'http';
 export type MiddlewareId = 'vault' | 'quarantine' | 'hitl' | 'redact' | 'budget';
+export type DataOrigin = 'real' | 'demo' | 'fixture';
+export interface VisibilitySettings {
+  showDemo: boolean;
+  showFixtures: boolean;
+}
 
 export interface HostProfile {
+  origin?: DataOrigin;
   id: string;
   name: string;
   latencyMs: number;
@@ -36,6 +42,7 @@ export interface McpToolAnnotations {
 }
 
 export interface McpTool {
+  origin?: DataOrigin;
   name: string;
   serverId: string;
   description: string;
@@ -70,6 +77,7 @@ export interface McpPrompt {
 }
 
 export interface QuarantineRecord {
+  origin?: DataOrigin;
   serverId: string;
   toolName: string;
   expectedHash: string;
@@ -99,7 +107,7 @@ export interface McpServer {
   state: ServerState;
   fingerprint: string;
   secretRef?: string;
-  origin?: 'demo' | 'real';
+  origin?: DataOrigin;
   tools: McpTool[];
   resources: McpResource[];
   prompts: McpPrompt[];
@@ -147,6 +155,7 @@ export interface WorkspaceSkillCandidate {
 }
 
 export interface DualLayerSkill {
+  origin?: DataOrigin;
   id: string;
   version: string;
   summary: string;
@@ -173,6 +182,7 @@ export interface KnowledgeChunk {
 }
 
 export interface KnowledgeDoc {
+  origin?: DataOrigin;
   id: string;
   filePath: string;
   chunkCount: number;
@@ -185,6 +195,7 @@ export interface KnowledgeDoc {
 }
 
 export interface SharedMemory {
+  origin?: DataOrigin;
   id: string;
   host: string;
   topic: string;
@@ -240,6 +251,7 @@ export interface KnowledgeAnalytics {
 }
 
 export interface VaultEntry {
+  origin?: DataOrigin;
   key: string;
   serviceName: string;
   maskedValue: string;
@@ -258,6 +270,7 @@ export interface HitlApproval {
 }
 
 export interface AuditRpcEvent {
+  origin?: DataOrigin;
   id: string;
   timestamp: string;
   host: string;
@@ -336,6 +349,7 @@ export interface TrinitySearchResult {
 }
 
 export interface GatewayStateSnapshot {
+  visibility: VisibilitySettings;
   metrics: GatewaySummaryMetrics;
   hosts: HostProfile[];
   middleware: MiddlewareRule[];

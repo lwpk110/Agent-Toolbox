@@ -221,6 +221,21 @@ app.get('/health', (_req, res) => {
 });
 
 /* ---------- Agent-Toolbox Gateway REST API (/api/v1/*) ---------- */
+app.get('/api/v1/settings/visibility', (_req, res) => {
+  sendOk(res, gatewayStore.getVisibility());
+});
+
+app.put('/api/v1/settings/visibility', (req, res) => {
+  const patch = req.body;
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch) || Object.entries(patch).some(([key, value]) =>
+    !['showDemo', 'showFixtures'].includes(key) || typeof value !== 'boolean'
+  )) {
+    sendErr(res, 400, 'INVALID_VISIBILITY', 'showDemo 和 showFixtures 必须是布尔值。');
+    return;
+  }
+  sendOk(res, gatewayStore.setVisibility(patch));
+});
+
 app.get('/api/v1/state', (_req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
@@ -596,6 +611,12 @@ app.post('/api/v1/quarantine/:serverId/resolve', async (req, res) => {
 });
 
 app.post('/api/v1/quarantine/simulate', (req, res) => {
+  try {
+    gatewayStore.assertDemoEnabled();
+  } catch {
+    sendErr(res, 403, 'DEMO_DISABLED', '演示数据已关闭。');
+    return;
+  }
   const serverId = typeof req.body?.serverId === 'string' ? req.body.serverId : 'scraper';
   gatewayStore.simulateQuarantine(serverId);
   sendOk(res, gatewayStore.getSnapshot());
@@ -951,6 +972,10 @@ app.post('/api/v1/hitl/:id/resolve', (req, res) => {
 });
 
 app.post('/api/v1/sandbox/rpc', (req, res) => {
+  if (!gatewayStore.getVisibility().showDemo) {
+    sendErr(res, 403, 'DEMO_DISABLED', '演示数据已关闭。');
+    return;
+  }
   const { host, stepIndex, method, argumentsObj } = req.body || {};
   const evt = gatewayStore.executeRpc({
     hostName: typeof host === 'string' ? host : 'Claude Code',

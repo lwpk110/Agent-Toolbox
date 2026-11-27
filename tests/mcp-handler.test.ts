@@ -10,6 +10,8 @@ function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-handler-'));
   dirs.push(dir);
   const store = new GatewayStore({ dataFile: path.join(dir, 'state.json') });
+  // These handler tests exercise the built-in skill and stdio seed migrations.
+  store.setVisibility({ showDemo: true });
   store.updateServer('fixture', { enabled: false });
   return { store, handle: createMcpHandler(store) };
 }
@@ -60,6 +62,8 @@ test('lists real schemas and implements audited gateway meta tools without sandb
 
 test('rejects invalid requests and params with original id, and keeps skill tools isolated to their mounting host', async () => {
   const { store, handle } = setup();
+  // Use a non-demo skill for the isolation assertion; MCP never exposes demo skills.
+  (store as any).skills.find((skill: any) => skill.id === 'security-owasp-auditor').origin = 'real';
   expect((await handle(null)).error.code).toBe(-32600);
   expect((await handle([])).error.code).toBe(-32600);
   expect(await handle([{ jsonrpc: '2.0', method: 'notification' }])).toBe(null);

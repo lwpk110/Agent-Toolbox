@@ -47,3 +47,14 @@ REST 管理接口通常返回 `{ ok, data, meta }`。具体参数和状态码以
 控制台从各分类目录读取 Markdown。文档归档和命名约定见[文档索引](../README.md)。
 
 真实 stdio 入口、临时 Codex 配置、联调日志和环境限制见 [stdio MCP 联调](stdio-mcp-entry.md)。
+
+## 数据来源开关
+
+网关会为数据标记 `real`、`demo` 或 `fixture` 来源。真实数据和用户运行时添加的数据始终保留；开关只影响控制台展示和 MCP 工具暴露。首次创建数据文件时，可用环境变量设置默认值：
+
+```bash
+TOOLBOX_DEMO_DATA=on   # 首次默认显示演示数据；off 或未设置则隐藏
+TOOLBOX_FIXTURE=off    # 首次默认隐藏测试夹具；未设置则显示
+```
+
+环境变量只参与首次默认值，已经持久化的设置以控制台的“数据来源”开关及 `GET/PUT /api/v1/settings/visibility` 为准。测试应使用临时 `TOOLBOX_DATA_FILE` 和 `TOOLBOX_LOCK_FILE`，并在需要断言内置演示种子时显式调用 `store.setVisibility({ showDemo: true })`；需要测试夹具过滤时再设置 `showFixtures`。

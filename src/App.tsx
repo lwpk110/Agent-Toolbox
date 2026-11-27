@@ -142,6 +142,7 @@ export default function App() {
       'vault.deleted',
       'sync.pushed',
       'sync.config_updated',
+      'settings.changed',
     ];
     eventNames.forEach((ev) => es.addEventListener(ev, refresh));
     return () => es.close();
@@ -499,6 +500,12 @@ export default function App() {
     setState(res.data);
   };
 
+  const handleVisibilityChange = async (key: 'showDemo' | 'showFixtures', value: boolean) => {
+    await api.updateVisibility({ [key]: value });
+    await loadState();
+    if (key === 'showDemo' && !value && view === 'sandbox') navigate('home');
+  };
+
   const quarantinedCount = state?.metrics.quarantinedCount || 0;
   const sections = getSections(view);
 
@@ -516,7 +523,7 @@ export default function App() {
         </button>
 
         <nav className="nav" id="nav" aria-label="主导航">
-          {VIEWS.map((v) => {
+          {VIEWS.filter(v => v.id !== 'sandbox' || state?.visibility.showDemo !== false).map((v) => {
             const active = view === v.id;
             return (
               <button
@@ -536,6 +543,30 @@ export default function App() {
             );
           })}
         </nav>
+
+        <details className="visibility-menu">
+          <summary>数据来源</summary>
+          <div className="visibility-options">
+            <label>
+              <span>演示数据</span>
+              <input
+                type="checkbox"
+                checked={state?.visibility.showDemo ?? false}
+                disabled={!state}
+                onChange={(event) => handleVisibilityChange('showDemo', event.target.checked).catch(() => showToast('更新数据来源失败'))}
+              />
+            </label>
+            <label>
+              <span>测试夹具</span>
+              <input
+                type="checkbox"
+                checked={state?.visibility.showFixtures ?? true}
+                disabled={!state}
+                onChange={(event) => handleVisibilityChange('showFixtures', event.target.checked).catch(() => showToast('更新数据来源失败'))}
+              />
+            </label>
+          </div>
+        </details>
 
         <button
           className="btn pri"
