@@ -9,5 +9,8 @@ declare module 'bun:test' {
     toEqual(expected: unknown): void;
     not: { toContain(expected: string): void; toThrow(): void };
   };
-  export const test: (name: string, fn: () => void | Promise<void>) => void;
+  export const test: {
+    (name: string, fn: () => void | Promise<void>, timeout?: number): void;
+    skip(name: string, fn: () => void | Promise<void>): void;
+  };
 }

@@ -87,6 +87,8 @@ export interface McpServer {
   name: string;
   protocol: TransportProtocol;
   commandOrUrl: string;
+  cwd?: string;
+  connectOnStart?: boolean;
   args?: string[];
   env?: Record<string, string>;
   headers?: Record<string, string>;
@@ -105,6 +107,7 @@ export type SkillFileCategory = 'entry' | 'script' | 'reference' | 'template' | 
 export type SkillSourceType = 'builtin' | 'folder-upload' | 'workspace' | 'manual';
 
 export interface SkillAttachedTool {
+  inputSchema?: Record<string, unknown>;
   name: string;
   estimatedTokens: number;
   description: string;

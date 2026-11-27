@@ -1,4 +1,8 @@
 import crypto from 'crypto';
+import path from 'node:path';
+import { RpcError } from './rpcError';
+import { DownstreamMcp } from './downstreamMcp';
+import { metaTools } from './metaTools';
 import { EventEmitter } from 'events';
 import { downstreamPool } from './downstreamPool';
 import { GatewayPersistence, type PersistedGatewayState } from './persistence';
@@ -37,6 +41,10 @@ import type {
   VectorDimensionBucket,
   VectorHealthStats,
 } from '../types/toolbox';
+
+function codexConfigSnippet() {
+  return `# 写入 Codex config.toml\n[mcp_servers.agent-toolbox]\ncommand = "bun"\nargs = [${JSON.stringify(path.resolve('src/cli/serve-stdio.ts'))}]\nenv = { TOOLBOX_HOST = "Codex CLI" }`;
+}
 
 const FULL_EXPOSURE_TOKENS = 18170;
 const META_TOOLS_TOKENS = 1580;
@@ -485,6 +493,10 @@ export const SANDBOX_SCENARIOS = [
 export class GatewayStore {
   public readonly events = new EventEmitter();
   private readonly persistence: GatewayPersistence;
+  private readonly downstream = new DownstreamMcp(server => {
+    server.state = 'offline';
+    this.emitEvent('server.disconnected', { serverId: server.id });
+  });
 
   private hosts: HostProfile[] = [
     {
@@ -510,7 +522,7 @@ export class GatewayStore {
       online: true,
       scope: 'audit',
       configSnippet:
-        '# 写入 ~/.codex/config.toml\n[mcp_servers.agent-toolbox]\ncommand = "npx"\nargs = ["agent-toolbox", "serve", "--stdio"]',
+        codexConfigSnippet(),
     },
     {
       id: 'opencode',
@@ -571,7 +583,13 @@ export class GatewayStore {
 
   private servers: McpServer[] = [
     {
+      id: 'fixture', name: 'fixture', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/echo-mcp.ts')], cwd: process.cwd(),
+      enabled: true, state: 'offline', latencyMs: 0, fingerprint: '', tools: [], resources: [], prompts: [],
+    },
+    {
       id: 'github',
+      connectOnStart: false,
       name: 'github',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -706,6 +724,7 @@ export class GatewayStore {
     },
     {
       id: 'postgres',
+      connectOnStart: false,
       name: 'postgres',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -812,6 +831,7 @@ export class GatewayStore {
     },
     {
       id: 'slack',
+      connectOnStart: false,
       name: 'slack',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -1282,13 +1302,27 @@ export class GatewayStore {
 
   constructor(options: { dataFile?: string } = {}) {
     this.persistence = new GatewayPersistence(options.dataFile);
+    process.once('exit', () => this.downstream.close());
     const saved = this.persistence.load();
-    if (saved) this.restoreState(saved);
+    if (saved) {
+      const fixture = this.servers[0];
+      this.restoreState(saved);
+      if (!saved.stdioMcpSeedVersion) {
+        if (!this.servers.some(s => s.id === 'fixture')) this.servers.push(fixture);
+        for (const server of this.servers) {
+          if (['github', 'postgres', 'slack'].includes(server.id) && server.commandOrUrl === 'npx' && server.args?.some(arg => arg.startsWith('@modelcontextprotocol/server-'))) server.connectOnStart = false;
+        }
+        this.scheduleSave();
+      }
+    }
     else this.scheduleSave();
+    const codex = this.hosts.find(h => h.id === 'codex');
+    if (codex) codex.configSnippet = codexConfigSnippet();
   }
 
   private persistedState(): PersistedGatewayState {
     return {
+      stdioMcpSeedVersion: 1,
       hosts: this.hosts,
       middleware: this.middleware,
       servers: this.servers,
@@ -1682,6 +1716,7 @@ export class GatewayStore {
     name: string;
     protocol: TransportProtocol;
     commandOrUrl: string;
+    cwd?: string;
     args?: string[];
     env?: Record<string, string>;
     headers?: Record<string, string>;
@@ -1761,6 +1796,7 @@ export class GatewayStore {
       name: id,
       protocol: input.protocol,
       commandOrUrl: input.commandOrUrl.trim(),
+      cwd: input.cwd,
       args: Array.isArray(input.args) ? input.args.map((a) => String(a)).filter(Boolean) : undefined,
       env: Object.keys(safeEnv).length ? safeEnv : undefined,
       headers: Object.keys(safeHeaders).length ? safeHeaders : undefined,
@@ -1873,6 +1909,7 @@ export class GatewayStore {
         name: cleanId,
         protocol,
         commandOrUrl: url || command,
+        cwd: typeof cfg.cwd === 'string' ? cfg.cwd : undefined,
         args,
         env,
         headers,
@@ -1904,6 +1941,7 @@ export class GatewayStore {
     patch: {
       protocol?: TransportProtocol;
       commandOrUrl?: string;
+      cwd?: string;
       args?: string[];
       env?: Record<string, string>;
       headers?: Record<string, string>;
@@ -1917,6 +1955,7 @@ export class GatewayStore {
     if (patch.protocol && ['stdio', 'sse', 'http'].includes(patch.protocol)) {
       server.protocol = patch.protocol;
     }
+    if (typeof patch.cwd === 'string') server.cwd = patch.cwd;
     if (typeof patch.commandOrUrl === 'string' && patch.commandOrUrl.trim()) {
       server.commandOrUrl = patch.commandOrUrl.trim();
     }
@@ -1961,6 +2000,7 @@ export class GatewayStore {
     }
 
     this.markDirty();
+    this.downstream.reconcile(this.servers);
     this.emitEvent('server.updated', { serverId });
     return { server };
   }
@@ -1971,6 +2011,7 @@ export class GatewayStore {
     if (this.servers.length !== prev) {
       this.quarantines = this.quarantines.filter((q) => q.serverId !== serverId);
       this.markDirty();
+      this.downstream.reconcile(this.servers);
       this.emitEvent('server.deleted', { serverId });
       return true;
     }
@@ -2714,9 +2755,83 @@ export class GatewayStore {
     return item;
   }
 
-  /**
-   * Executes a JSON-RPC 2.0 scenario or live MCP request through the real 5-stage middleware pipeline.
-   */
+  public async refreshMcpTools() {
+    this.downstream.reconcile(this.servers);
+    for (const server of this.servers) {
+      if (server.state !== 'quarantined' && (server.connectOnStart === false || server.protocol !== 'stdio' || !server.enabled)) server.state = 'offline';
+    }
+    const active = this.servers.filter(s => s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false && s.state !== 'quarantined');
+    await Promise.all(active.map(async server => {
+      try {
+        const tools = await this.downstream.list(server);
+        server.tools = tools.map(tool => {
+          const existing = server.tools.find(t => t.name === tool.name);
+          return {
+            name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
+            serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
+            readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
+            estimatedTokens: existing?.estimatedTokens || 100, fingerprint: existing?.fingerprint || '', lockedFingerprint: existing?.lockedFingerprint || '',
+          };
+        });
+        server.state = 'ok';
+        this.scheduleSave();
+      } catch (error) { console.error(`[mcp] ${server.id}: ${String(error)}`); server.state = 'offline'; }
+    }));
+  }
+
+  public async callDownstream(name: string, args: Record<string, unknown>) {
+    const server = this.servers.find(s => s.tools.some(t => t.name === name));
+    if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
+    return this.downstream.call(server, name, args);
+  }
+
+  public async closeMcpConnections() { this.downstream.close(); }
+
+  public getMcpTool(name: string, hostName: string) {
+    const meta = metaTools.find(t => t.name === name);
+    if (meta) return meta;
+    const server = this.servers.find(s => s.tools.some(t => t.name === name));
+    const tool = server?.tools.find(t => t.name === name);
+    if (!server || !tool) {
+      const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools).find(t => t.name === name);
+      if (attached) return { ...attached, inputSchema: attached.inputSchema || { type: 'object', properties: {} } };
+      throw new RpcError(-32602, 'Unknown tool');
+    }
+    const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
+    if (server.state === 'quarantined' && this.isMiddlewareEnabled('quarantine')) throw new RpcError(-32001, 'Tool quarantined');
+    if (host && host.scope !== 'full' && !tool.readOnly) throw new RpcError(-32003, 'Host scope forbids this tool');
+    if (tool.hitl && this.isMiddlewareEnabled('hitl')) throw new RpcError(-32002, 'Tool requires human approval before execution');
+    if (server.secretRef && this.isMiddlewareEnabled('vault') && !this.getVaultEntriesWithRefs().some(v => `vault://${v.key}` === server.secretRef && v.configured)) throw new RpcError(-32004, 'Required vault secret missing');
+    const budget = this.middleware.find(m => m.id === 'budget');
+    if (budget?.enabled && this.getMetrics().currentExposureTokens > (budget.config?.maxTokensPerTurn ?? 4000)) throw new RpcError(-32005, 'Token budget exceeded');
+    return { ...tool, inputSchema: tool.inputSchema || { type: 'object', properties: {} } };
+  }
+
+  public getMcpTools(hostName: string) {
+    const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
+    const visible = this.servers.filter(s => s.enabled && s.state !== 'quarantined')
+      .flatMap(s => s.tools.filter(t => t.mode === 'pinned' && (!host || host.scope === 'full' || t.readOnly)));
+    const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools);
+    return [...metaTools, ...visible, ...attached].map(t => ({
+      name: t.name, description: t.description,
+      inputSchema: ('inputSchema' in t && t.inputSchema) || { type: 'object', properties: {} },
+    }));
+  }
+
+  public recordMcpCall(host: string, requestPayload: Record<string, unknown>, responsePayload: Record<string, unknown>, started: number) {
+    const event: AuditRpcEvent = {
+      id: crypto.randomUUID(), timestamp: nowTimeStr(), host,
+      method: String((requestPayload.params as Record<string, unknown>)?.name || requestPayload.method),
+      outcome: responsePayload.error ? 'blocked' : 'ok', latencyMs: Date.now() - started,
+      requestPayload: JSON.parse(this.redactSensitiveText(JSON.stringify(requestPayload))),
+      responsePayload: JSON.parse(this.redactSensitiveText(JSON.stringify(responsePayload))),
+    };
+    this.auditLogs.unshift(event);
+    this.auditLogs.length = Math.min(this.auditLogs.length, 60);
+    this.emitEvent('rpc.executed', event);
+  }
+
+  /** Sandbox demonstration only. MCP transports must use mcpHandler. */
   public executeRpc(params: {
     hostName: string;
     stepIndex?: number;

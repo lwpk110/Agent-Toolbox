@@ -1,4 +1,6 @@
 import express from 'express';
+import crypto from 'node:crypto';
+import { handleMcpMessage, rpcError } from './src/server/mcpHandler';
 import fs from 'fs';
 import path from 'path';
 import {
@@ -45,7 +47,14 @@ const SKILLS_DIR = path.resolve(ROOT_DIR, 'skills');
 const PROTOTYPE_DIR = path.resolve(ROOT_DIR, 'prototype');
 const DIST_DIR = path.resolve(ROOT_DIR, 'dist');
 
-app.use(express.json({ limit: '4mb' }));
+app.use(express.json({ limit: '4mb', strict: false }));
+app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (req.path === '/api/mcp/messages' && error instanceof SyntaxError) {
+    res.json(rpcError(null, -32700, 'Parse error'));
+    return;
+  }
+  next(error);
+});
 
 function sendOk(res: express.Response, data: unknown, extra?: Record<string, unknown>) {
   res.json({
@@ -452,7 +461,7 @@ app.post('/api/v1/servers/import-json', (req, res) => {
 });
 
 app.post('/api/v1/servers', (req, res) => {
-  const { name, protocol, commandOrUrl, args, env, headers, defaultMode, secretRef, initialToolName, initialToolDesc } =
+  const { name, protocol, commandOrUrl, cwd, args, env, headers, defaultMode, secretRef, initialToolName, initialToolDesc } =
     req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     sendErr(res, 400, 'INVALID_NAME', '请填写 MCP Server 命名空间名称。');
@@ -471,6 +480,7 @@ app.post('/api/v1/servers', (req, res) => {
     name,
     protocol: protocol as TransportProtocol,
     commandOrUrl,
+    cwd: typeof cwd === 'string' ? cwd : undefined,
     args: Array.isArray(args) ? args.map(String) : undefined,
     env: env && typeof env === 'object' && !Array.isArray(env) ? env : undefined,
     headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : undefined,
@@ -487,10 +497,11 @@ app.post('/api/v1/servers', (req, res) => {
 });
 
 app.patch('/api/v1/servers/:id', (req, res) => {
-  const { protocol, commandOrUrl, args, env, headers, enabled, secretRef } = req.body || {};
+  const { protocol, commandOrUrl, cwd, args, env, headers, enabled, secretRef } = req.body || {};
   const result = gatewayStore.updateServer(req.params.id, {
     protocol: ['stdio', 'sse', 'http'].includes(protocol) ? (protocol as TransportProtocol) : undefined,
     commandOrUrl: typeof commandOrUrl === 'string' ? commandOrUrl : undefined,
+    cwd: typeof cwd === 'string' ? cwd : undefined,
     args: Array.isArray(args) ? args.map(String) : undefined,
     env: env && typeof env === 'object' && !Array.isArray(env) ? env : undefined,
     headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : undefined,
@@ -966,13 +977,7 @@ function attachMcpNotificationStream(req: express.Request, res: express.Response
   }
 
   const onEvent = (evt: { type: string; payload: unknown }) => {
-    if (
-      evt.type === 'skill.mounted' ||
-      evt.type === 'skill.unmounted' ||
-      evt.type === 'tool.updated' ||
-      evt.type === 'server.added' ||
-      evt.type === 'server.updated'
-    ) {
+    if (evt.type === 'skill.mounted' || evt.type === 'skill.unmounted' || evt.type === 'tool.updated' || evt.type.startsWith('server.')) {
       const notification = {
         jsonrpc: '2.0',
         method: 'notifications/tools/list_changed',
@@ -1019,14 +1024,22 @@ app.get('/api/mcp/sse', (req, res) => {
   attachMcpNotificationStream(req, res, true);
 });
 
+const mcpClients = new Map<string, string>();
 app.post('/api/mcp/messages', async (req, res) => {
-  const hostName = resolveMcpHostHeader(req);
-  const outcome = await dispatchMcpJsonRpc(req.body, hostName);
-  if (outcome.isNotification) {
-    res.status(202).end();
-    return;
+  const sessionId = req.get('mcp-session-id');
+  const headerHost = req.get('x-toolbox-host');
+  const initialize = (Array.isArray(req.body) ? req.body : [req.body]).find(msg => msg?.method === 'initialize');
+  const clientName = initialize?.params?.clientInfo?.name;
+  const hostName = headerHost || (typeof clientName === 'string' ? clientName : undefined) || (sessionId ? mcpClients.get(sessionId) : undefined);
+  const response = await handleMcpMessage(req.body, { hostName });
+  if (initialize && response && (Array.isArray(response) ? response.some(r => r.result?.serverInfo) : response.result?.serverInfo)) {
+    const id = crypto.randomUUID();
+    if (mcpClients.size >= 256) mcpClients.delete(mcpClients.keys().next().value!);
+    mcpClients.set(id, hostName || 'Unknown Host');
+    res.setHeader('mcp-session-id', id);
   }
-  res.json(outcome.response);
+  if (response === null) res.status(202).end();
+  else res.json(response);
 });
 
 /* ---------- Engineering Docs & Prototype Routes ---------- */
@@ -1059,6 +1072,7 @@ if (fs.existsSync(PROTOTYPE_DIR)) {
 }
 
 async function startServer() {
+  await gatewayStore.refreshMcpTools();
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
