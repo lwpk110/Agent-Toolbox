@@ -1,10 +1,61 @@
 import { executeMeta } from './mcpMetaExecutor';
 import { gatewayStore, type GatewayStore } from './gatewayStore';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { RpcError, rpcError } from './rpcError';
 export { rpcError } from './rpcError';
 export function isObject(value: unknown): value is Record<string, any> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function executeSkillTool(store: GatewayStore, name: string, args: Record<string, unknown>, hostName: string): Promise<unknown> {
+  const skill = store.getSnapshot().skills.find(item => item.origin !== 'demo' && item.mounted && item.mountedBy === hostName && item.attachedTools.some(tool => tool.name === name));
+  if (!skill) throw new RpcError(-32602, 'Skill tool is not mounted for this host');
+  const attached = skill.attachedTools.find(tool => tool.name === name)!;
+  const namedScript = name.slice(name.indexOf('__') + 2);
+  const filePath = skill.files.find(file => file.category === 'script' && file.path.startsWith('scripts/')
+    && file.path.replace(/^scripts\//, '').replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9_]/g, '_') === namedScript)?.path
+    || (skill.attachedTools.length === 1 ? skill.files.find(file => file.category === 'script' && file.path.startsWith('scripts/'))?.path : undefined);
+  const sourcePath = skill.sourcePath;
+  if (!filePath || !sourcePath?.startsWith('skills/') || !/^scripts\/[\w.-]+\.(?:[cm]?js|ts)$/.test(filePath)) throw new RpcError(-32602, 'Skill tool has no executable package script');
+  const skillsRoot = fs.realpathSync(path.resolve(process.cwd(), 'skills'));
+  const packageRoot = path.resolve(process.cwd(), sourcePath);
+  const scriptPath = path.resolve(packageRoot, filePath);
+  const relative = path.relative(packageRoot, scriptPath);
+  const realPackageRoot = fs.realpathSync(packageRoot);
+  const realScriptPath = fs.realpathSync(scriptPath);
+  if (path.relative(skillsRoot, realPackageRoot).startsWith('..') || relative.startsWith('..') || path.isAbsolute(relative) || !realScriptPath.startsWith(`${realPackageRoot}${path.sep}`)) throw new RpcError(-32602, 'Skill script is outside its package');
+  if (!skill.files.some(file => file.path === filePath && file.category === 'script')) throw new RpcError(-32602, 'Skill script is not classified as a script');
+  const token = args.token;
+  if (typeof token !== 'string') throw new RpcError(-32602, 'Missing argument: arguments.token');
+  const executable = 'node';
+  const scriptArgs = filePath.endsWith('.ts') ? ['--import', 'tsx/esm', scriptPath, token] : [scriptPath, token];
+  return await new Promise((resolve, reject) => {
+    const outputFile = path.join(requireTmpDir(), `toolbox-skill-${crypto.randomUUID()}.out`);
+    const outputFd = fs.openSync(outputFile, 'wx', 0o600);
+    const child = spawn(executable, scriptArgs, { cwd: packageRoot, stdio: ['ignore', outputFd, 'pipe'], shell: false });
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGKILL'), 10_000);
+    child.stderr?.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
+    child.on('error', error => { clearTimeout(timer); fs.closeSync(outputFd); fs.rmSync(outputFile, { force: true }); reject(new RpcError(-32602, `Could not start skill script: ${error.message}`)); });
+    child.on('close', code => {
+      clearTimeout(timer);
+      fs.closeSync(outputFd);
+      const stdout = fs.readFileSync(outputFile, 'utf8');
+      fs.rmSync(outputFile, { force: true });
+      if (code !== 0) return reject(new RpcError(-32602, `Skill script failed${stderr ? `: ${stderr.trim()}` : ''}`));
+      const output = stdout.trimEnd();
+      try { resolve(JSON.parse(output)); } catch { resolve(output); }
+    });
+  });
+}
+
+function requireTmpDir(): string {
+  return os.tmpdir();
 }
 
 function validateArguments(value: unknown, schema: any, path = 'arguments'): void {
@@ -70,12 +121,16 @@ export function createMcpHandler(store: GatewayStore) {
         case 'tools/call': {
           if (typeof params.name !== 'string' || (params.arguments !== undefined && !isObject(params.arguments))) throw new RpcError(-32602, 'Invalid tools/call params');
           const args = params.arguments || {};
-          if (!params.name.startsWith('toolbox__')) await store.validateMcpTool(params.name);
+          const matchingSkill = store.getSnapshot().skills.find(skill => skill.attachedTools.some(tool => tool.name === params.name));
+          if (!params.name.startsWith('toolbox__') && !matchingSkill) await store.validateMcpTool(params.name);
           const definition = store.getMcpTool(params.name, hostName);
           const schema = definition.inputSchema as any;
           validateArguments(args, schema);
-          const actual: any = params.name.startsWith('toolbox__') ? executeMeta(store, params.name, args, hostName) : await store.callDownstream(params.name, args);
-          result = { content: [{ type: 'text', text: store.redactSensitiveText(JSON.stringify(actual)) }], ...(actual?.isError ? { isError: true } : {}) };
+          const skillTool = Boolean(matchingSkill);
+          const actual: any = params.name.startsWith('toolbox__') ? executeMeta(store, params.name, args, hostName) : skillTool
+            ? await executeSkillTool(store, params.name, args, hostName)
+            : await store.callDownstream(params.name, args);
+          result = { content: [{ type: 'text', text: store.redactSensitiveText(typeof actual === 'string' ? actual : JSON.stringify(actual)) }], ...(actual?.isError ? { isError: true } : {}) };
           break;
         }
         default: throw new RpcError(-32601, `Method not found: ${msg.method}`);
