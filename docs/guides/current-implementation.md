@@ -6,14 +6,14 @@ Agent-Toolbox 由一个 Express 进程提供 React 控制台、REST API、服务
 
 | 模块 | 当前可用 | 目标设计 |
 | --- | --- | --- |
-| 总览 | 查看网关快照，管理宿主配置、权限和中间件，复制接入示例 | 守护进程、stdio 代理及与四个宿主的联调 |
-| MCP 网关 | 管理服务和工具配置、导入 MCP JSON、切换 Pinned / Lazy、演练隔离和审批。探活与下游工具结果由内存网关模拟 | 真实连接下游服务、调用工具和持久化 Schema 锁文件 |
-| Skill 中心 | 创建、导入 `skills/` 下的目录包，编辑运行时副本、挂载或卸载 Skill，通过沙箱读取包内资源 | 将动态挂载和工具调用接入真实宿主会话 |
+| 总览 | 查看网关快照，管理宿主配置、权限和中间件，复制接入示例 | 自动启动守护进程及四个宿主的完整联调 |
+| MCP 网关 | 管理服务和工具配置、导入 MCP JSON、切换 Pinned / Lazy、演练隔离和审批。stdio MCP 真实会话、工具发现与转发；默认提供 fixture__echo。沙箱演示保留 | 扩展所有下游、持久化 Schema 锁文件 |
+| Skill 中心 | 创建、导入 `skills/` 下的目录包，编辑运行时副本、挂载或卸载 Skill，通过沙箱读取包内资源 | 为其余 Skill 工具配置真实下游执行器 |
 | 知识库 | 导入 Markdown、管理文档和记忆，按关键词和内置同义词检索文档、记忆与 Skill，查看包含预置数据的统计图 | 使用嵌入模型、向量索引与持久化数据 |
-| 同步与 Vault | 用 AES-256-GCM 在内存加密密钥并展示掩码，生成配置清单，执行推送前检查和同步演示 | Vault 落盘，以及通过 GitHub 实际拉取、推送和恢复 |
-| 沙箱与文档 | 运行预设或自定义 JSON-RPC 演练，查看审计记录和工程文档 | 完整的 MCP 会话与宿主接入 |
+| 同步与 Vault | 用 AES-256-GCM 加密落盘密钥并展示掩码，生成配置清单，执行推送前检查和同步演示 | 通过 GitHub 实际拉取、推送和恢复 |
+| 沙箱与文档 | 运行预设或自定义 JSON-RPC 演练，查看审计记录和工程文档 | 更多真实宿主联调 |
 
-宿主与工具配置、Skill 编辑、知识库内容、审计记录和 Vault 数据随进程重启恢复到初始化状态。导入工作区文档或 Skill 会读取磁盘并创建内存副本，控制台中的编辑作用于该副本。
+宿主与工具配置、Skill 编辑、知识库内容、审计记录和加密 Vault 通过原子 JSON 写入持久化，重启后恢复。导入工作区文档或 Skill 会读取磁盘并创建内存副本，控制台中的编辑作用于该副本。
 
 ## 代码入口与数据流
 
@@ -23,7 +23,9 @@ Agent-Toolbox 由一个 Express 进程提供 React 控制台、REST API、服务
 | `src/components/` | 各模块视图、共有控件、文档和图表渲染 |
 | `src/lib/api.ts`、`src/types/` | 前端请求、响应类型、网关和文档类型 |
 | `server.ts` | HTTP 路由、文档注册表、工作区文件读取和静态资源 |
-| `src/server/gatewayStore.ts` | 内存状态、RPC 演练、知识检索、Vault 和同步逻辑 |
+| `src/server/gatewayStore.ts` | 状态、持久化、RPC 演练、知识检索、Vault 和同步逻辑 |
+| `src/server/mcpHandler.ts`、`src/server/downstreamMcp.ts` | MCP JSON-RPC 处理与真实下游 stdio 会话 |
+| `src/cli/serve-stdio.ts` | 宿主 stdio → HTTP 薄桥与 SSE 通知转发 |
 
 前端通过 `GET /api/v1/state` 拉取快照，通过 `/api/v1/*` 提交变更，并订阅 `GET /api/v1/events`。Express 将业务操作交给 `GatewayStore`，并把它发出的事件转为 SSE。
 
@@ -34,7 +36,7 @@ Agent-Toolbox 由一个 Express 进程提供 React 控制台、REST API、服务
 | `GET /health` | 查询进程状态、网关指标和已登记文档数量 |
 | `GET /api/v1/state`、`GET /api/v1/events` | 获取控制台快照，订阅管理事件 |
 | `POST /api/v1/sandbox/rpc` | 执行沙箱步骤或自定义方法，并返回包含审计记录的快照 |
-| `GET /api/mcp/sse`、`POST /api/mcp/messages` | 体验 MCP SSE 通知与 JSON-RPC 处理。此实现直接通过 POST 响应返回 RPC 结果。 |
+| `GET /api/mcp/sse`、`POST /api/mcp/messages` | MCP SSE 通知与 JSON-RPC 请求（支持批量）；通知返回 202，其余请求回传原始 id。 |
 | `GET /api/docs`、`GET /api/docs/:slug`、`GET /raw/:slug` | 读取自动发现的文档索引、详情和 Markdown 原文 |
 | `GET /prototype/` | 预览静态交互原型，兼容旧路径 `/protype/` |
 
@@ -43,3 +45,5 @@ REST 管理接口通常返回 `{ ok, data, meta }`。具体参数和状态码以
 ## 维护文档
 
 控制台从各分类目录读取 Markdown。文档归档和命名约定见[文档索引](../README.md)。
+
+真实 stdio 入口、临时 Codex 配置、联调日志和环境限制见 [stdio MCP 联调](stdio-mcp-entry.md)。

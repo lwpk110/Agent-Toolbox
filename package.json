@@ -14,7 +14,8 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "bun test",
+    "serve:stdio": "bun src/cli/serve-stdio.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -43,5 +44,8 @@
     "tsx": "^4.21.0",
     "typescript": "^7.0.2",
     "@types/express": "^4.17.21"
+  },
+  "bin": {
+    "agent-toolbox": "./src/cli/serve-stdio.ts"
   }
 }

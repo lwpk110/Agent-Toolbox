@@ -78,6 +78,8 @@ export interface QuarantineRecord {
   mutatedDescription: string;
   baselineSchema?: string;
   mutatedSchema?: string;
+  descriptionDiff?: string;
+  schemaDiff?: string;
   riskReason: string;
   detectedAt: string;
 }
@@ -87,6 +89,8 @@ export interface McpServer {
   name: string;
   protocol: TransportProtocol;
   commandOrUrl: string;
+  cwd?: string;
+  connectOnStart?: boolean;
   args?: string[];
   env?: Record<string, string>;
   headers?: Record<string, string>;
@@ -105,6 +109,7 @@ export type SkillFileCategory = 'entry' | 'script' | 'reference' | 'template' | 
 export type SkillSourceType = 'builtin' | 'folder-upload' | 'workspace' | 'manual';
 
 export interface SkillAttachedTool {
+  inputSchema?: Record<string, unknown>;
   name: string;
   estimatedTokens: number;
   description: string;
@@ -258,7 +263,7 @@ export interface AuditRpcEvent {
   host: string;
   method: string;
   stepIndex?: number;
-  outcome: 'ok' | 'blocked' | 'pending_approval';
+  outcome: 'ok' | 'blocked' | 'pending_approval' | 'trusted';
   latencyMs: number;
   requestPayload: Record<string, unknown>;
   responsePayload: Record<string, unknown>;

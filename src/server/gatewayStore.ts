@@ -1,6 +1,12 @@
 import crypto from 'crypto';
+import path from 'node:path';
+import { RpcError } from './rpcError';
+import { DownstreamMcp } from './downstreamMcp';
+import { ToolboxLockFile, serverFingerprint, toolFingerprint, unifiedDiff } from './integrity';
+import { metaTools } from './metaTools';
 import { EventEmitter } from 'events';
 import { downstreamPool } from './downstreamPool';
+import { GatewayPersistence, type PersistedGatewayState } from './persistence';
 import type {
   AuditRpcEvent,
   CacheHitPoint,
@@ -37,14 +43,12 @@ import type {
   VectorHealthStats,
 } from '../types/toolbox';
 
+function codexConfigSnippet() {
+  return `# 写入 Codex config.toml\n[mcp_servers.agent-toolbox]\ncommand = "bun"\nargs = [${JSON.stringify(path.resolve('src/cli/serve-stdio.ts'))}]\nenv = { TOOLBOX_HOST = "Codex CLI" }`;
+}
+
 const FULL_EXPOSURE_TOKENS = 18170;
 const META_TOOLS_TOKENS = 1580;
-
-// Ephemeral AES-256-GCM master key (uses server-side env var when configured, otherwise secure random bytes in memory)
-const VAULT_MASTER_KEY = crypto
-  .createHash('sha256')
-  .update(process.env.TOOLBOX_VAULT_MASTER_KEY || crypto.randomBytes(32))
-  .digest();
 
 interface EncryptedSecret {
   iv: string;
@@ -52,9 +56,9 @@ interface EncryptedSecret {
   ciphertext: string;
 }
 
-function encryptSecret(plaintext: string): EncryptedSecret {
+function encryptSecret(plaintext: string, masterKey: Buffer): EncryptedSecret {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', VAULT_MASTER_KEY, iv);
+  const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
   return {
@@ -64,10 +68,10 @@ function encryptSecret(plaintext: string): EncryptedSecret {
   };
 }
 
-function decryptSecret(record: EncryptedSecret): string {
+function decryptSecret(record: EncryptedSecret, masterKey: Buffer): string {
   const decipher = crypto.createDecipheriv(
     'aes-256-gcm',
-    VAULT_MASTER_KEY,
+    masterKey,
     Buffer.from(record.iv, 'hex')
   );
   decipher.setAuthTag(Buffer.from(record.tag, 'hex'));
@@ -489,6 +493,14 @@ export const SANDBOX_SCENARIOS = [
 
 export class GatewayStore {
   public readonly events = new EventEmitter();
+  private readonly persistence: GatewayPersistence;
+  private readonly toolboxLock: ToolboxLockFile;
+  private readonly downstream = new DownstreamMcp(server => {
+    if (server.state !== 'quarantined') server.state = 'offline';
+    this.emitEvent('server.disconnected', { serverId: server.id });
+  }, server => {
+    void this.refreshMcpTools(server.id).catch(error => console.error(`[mcp] ${server.id} list_changed: ${String(error)}`));
+  });
 
   private hosts: HostProfile[] = [
     {
@@ -514,7 +526,7 @@ export class GatewayStore {
       online: true,
       scope: 'audit',
       configSnippet:
-        '# 写入 ~/.codex/config.toml\n[mcp_servers.agent-toolbox]\ncommand = "npx"\nargs = ["agent-toolbox", "serve", "--stdio"]',
+        codexConfigSnippet(),
     },
     {
       id: 'opencode',
@@ -575,7 +587,13 @@ export class GatewayStore {
 
   private servers: McpServer[] = [
     {
+      id: 'fixture', name: 'fixture', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/echo-mcp.ts')], cwd: process.cwd(),
+      enabled: true, state: 'offline', latencyMs: 0, fingerprint: '', tools: [], resources: [], prompts: [],
+    },
+    {
       id: 'github',
+      connectOnStart: false,
       name: 'github',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -710,6 +728,7 @@ export class GatewayStore {
     },
     {
       id: 'postgres',
+      connectOnStart: false,
       name: 'postgres',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -816,6 +835,7 @@ export class GatewayStore {
     },
     {
       id: 'slack',
+      connectOnStart: false,
       name: 'slack',
       protocol: 'stdio',
       commandOrUrl: 'npx',
@@ -1284,12 +1304,71 @@ export class GatewayStore {
   private pendingApprovals: HitlApproval[] = [];
   private auditLogs: AuditRpcEvent[] = [];
 
+  constructor(options: { dataFile?: string; lockFile?: string } = {}) {
+    this.persistence = new GatewayPersistence(options.dataFile);
+    this.toolboxLock = new ToolboxLockFile(options.lockFile);
+    process.once('exit', () => this.downstream.close());
+    const saved = this.persistence.load();
+    if (saved) {
+      const fixture = this.servers[0];
+      this.restoreState(saved);
+      if (!saved.stdioMcpSeedVersion) {
+        if (!this.servers.some(s => s.id === 'fixture')) this.servers.push(fixture);
+        for (const server of this.servers) {
+          if (['github', 'postgres', 'slack'].includes(server.id) && server.commandOrUrl === 'npx' && server.args?.some(arg => arg.startsWith('@modelcontextprotocol/server-'))) server.connectOnStart = false;
+        }
+        this.scheduleSave();
+      }
+    }
+    else this.scheduleSave();
+    const codex = this.hosts.find(h => h.id === 'codex');
+    if (codex) codex.configSnippet = codexConfigSnippet();
+  }
+
+  private persistedState(): PersistedGatewayState {
+    return {
+      stdioMcpSeedVersion: 1,
+      hosts: this.hosts,
+      middleware: this.middleware,
+      servers: this.servers,
+      quarantines: this.quarantines,
+      skills: this.skills,
+      docs: this.docs,
+      memories: this.memories,
+      vectorHealth: this.vectorHealth,
+      vaultEntries: this.vaultEntries,
+      encryptedSecrets: Object.fromEntries(this.encryptedSecrets),
+      sync: this.sync,
+      lastSyncedManifestJson: this.lastSyncedManifestJson,
+      pendingApprovals: this.pendingApprovals,
+      auditLogs: this.auditLogs,
+    };
+  }
+
+  private restoreState(saved: PersistedGatewayState): void {
+    const arrayFields = ['hosts', 'middleware', 'servers', 'quarantines', 'skills', 'docs', 'memories', 'vaultEntries', 'pendingApprovals', 'auditLogs'] as const;
+    for (const field of arrayFields) {
+      if (Array.isArray(saved[field])) Object.assign(this, { [field]: saved[field] });
+    }
+    if (saved.vectorHealth && typeof saved.vectorHealth === 'object') this.vectorHealth = saved.vectorHealth as VectorHealthStats;
+    if (saved.sync && typeof saved.sync === 'object') this.sync = saved.sync as SyncStatus;
+    if (typeof saved.lastSyncedManifestJson === 'string') this.lastSyncedManifestJson = saved.lastSyncedManifestJson;
+    if (saved.encryptedSecrets && typeof saved.encryptedSecrets === 'object' && !Array.isArray(saved.encryptedSecrets)) {
+      this.encryptedSecrets = new Map(Object.entries(saved.encryptedSecrets as Record<string, EncryptedSecret>));
+    }
+  }
+
+  private scheduleSave(): void {
+    this.persistence.schedule(this.persistedState());
+  }
+
   private emitEvent(type: string, payload: unknown) {
     this.events.emit('gateway-event', {
       type,
       timestamp: new Date().toISOString(),
       payload,
     });
+    this.scheduleSave();
   }
 
   private markDirty() {
@@ -1642,6 +1721,7 @@ export class GatewayStore {
     name: string;
     protocol: TransportProtocol;
     commandOrUrl: string;
+    cwd?: string;
     args?: string[];
     env?: Record<string, string>;
     headers?: Record<string, string>;
@@ -1721,6 +1801,7 @@ export class GatewayStore {
       name: id,
       protocol: input.protocol,
       commandOrUrl: input.commandOrUrl.trim(),
+      cwd: input.cwd,
       args: Array.isArray(input.args) ? input.args.map((a) => String(a)).filter(Boolean) : undefined,
       env: Object.keys(safeEnv).length ? safeEnv : undefined,
       headers: Object.keys(safeHeaders).length ? safeHeaders : undefined,
@@ -1833,6 +1914,7 @@ export class GatewayStore {
         name: cleanId,
         protocol,
         commandOrUrl: url || command,
+        cwd: typeof cfg.cwd === 'string' ? cfg.cwd : undefined,
         args,
         env,
         headers,
@@ -1864,6 +1946,7 @@ export class GatewayStore {
     patch: {
       protocol?: TransportProtocol;
       commandOrUrl?: string;
+      cwd?: string;
       args?: string[];
       env?: Record<string, string>;
       headers?: Record<string, string>;
@@ -1877,6 +1960,7 @@ export class GatewayStore {
     if (patch.protocol && ['stdio', 'sse', 'http'].includes(patch.protocol)) {
       server.protocol = patch.protocol;
     }
+    if (typeof patch.cwd === 'string') server.cwd = patch.cwd;
     if (typeof patch.commandOrUrl === 'string' && patch.commandOrUrl.trim()) {
       server.commandOrUrl = patch.commandOrUrl.trim();
     }
@@ -1921,6 +2005,7 @@ export class GatewayStore {
     }
 
     this.markDirty();
+    this.downstream.reconcile(this.servers);
     this.emitEvent('server.updated', { serverId });
     return { server };
   }
@@ -1931,6 +2016,7 @@ export class GatewayStore {
     if (this.servers.length !== prev) {
       this.quarantines = this.quarantines.filter((q) => q.serverId !== serverId);
       this.markDirty();
+      this.downstream.reconcile(this.servers);
       this.emitEvent('server.deleted', { serverId });
       return true;
     }
@@ -1970,33 +2056,57 @@ export class GatewayStore {
     return null;
   }
 
-  public resolveQuarantine(serverId: string, action: 'rollback' | 'trust'): McpServer | null {
+  public async resolveQuarantine(serverId: string, action: 'rollback' | 'trust'): Promise<{ server: McpServer | null; conflict?: boolean; error?: string }> {
     const server = this.servers.find((s) => s.id === serverId);
-    if (!server) return null;
-    const rec = this.quarantines.find((q) => q.serverId === serverId);
-
-    if (action === 'rollback') {
-      const safeHash = rec ? rec.expectedHash.replace(/^sha256:/, '') : '7d11e4';
+    if (!server) return { server: null };
+    const isRealDownstream = server.protocol === 'stdio' && server.connectOnStart !== false && server.enabled;
+    if (!isRealDownstream) {
+      const record = this.quarantines.find(item => item.serverId === serverId);
+      const hash = action === 'rollback'
+        ? record?.expectedHash.replace(/^sha256:/, '') || '7d11e4'
+        : record?.actualHash.replace(/^sha256:/, '') || server.fingerprint;
       server.state = 'ok';
-      server.fingerprint = safeHash;
-      for (const t of server.tools) {
-        t.fingerprint = safeHash;
-        t.lockedFingerprint = safeHash;
+      server.fingerprint = hash;
+      for (const tool of server.tools) {
+        tool.fingerprint = hash;
+        tool.lockedFingerprint = hash;
       }
     } else {
-      const newHash = rec ? rec.actualHash.replace(/^sha256:/, '') : server.fingerprint;
-      server.state = 'ok';
-      server.fingerprint = newHash;
-      for (const t of server.tools) {
-        t.fingerprint = newHash;
-        t.lockedFingerprint = newHash;
+      try {
+        const liveTools = await this.downstream.list(server);
+        if (action === 'rollback') {
+          const lock = this.toolboxLock.get(serverId);
+          const differs = !this.toolboxLock.valid || !lock || liveTools.some(tool => !lock.tools[tool.name] || lock.tools[tool.name] !== toolFingerprint(tool));
+          this.acceptDownstreamTools(server, liveTools);
+          if (differs) {
+            this.scheduleSave();
+            return { server, conflict: true };
+          }
+          server.state = 'ok';
+        } else {
+          this.toolboxLock.writeServer(serverId, liveTools);
+          this.acceptDownstreamTools(server, liveTools);
+        }
+      } catch (error) {
+        console.error(`[quarantine] Could not verify ${serverId} during ${action}: ${String(error)}`);
+        return { server, conflict: true, error: action === 'trust' ? 'toolbox.lock.json is invalid' : undefined };
       }
-      this.markDirty();
     }
-
+    if (action === 'rollback' && server.state === 'quarantined') return { server, conflict: true };
+    if (action === 'trust') this.markDirty();
+    server.state = 'ok';
     this.quarantines = this.quarantines.filter((q) => q.serverId !== serverId);
+    if (action === 'trust') {
+      const audit: AuditRpcEvent = {
+        id: crypto.randomUUID(), timestamp: nowTimeStr(), host: 'Local Operator',
+        method: `quarantine.resolve:${serverId}`, outcome: 'trusted', latencyMs: 0,
+        requestPayload: { serverId, action }, responsePayload: { serverId, outcome: 'trusted' },
+      };
+      this.auditLogs.unshift(audit);
+      this.auditLogs.length = Math.min(this.auditLogs.length, 60);
+    }
     this.emitEvent('quarantine.resolved', { serverId, action });
-    return server;
+    return { server };
   }
 
   public simulateQuarantine(serverId = 'scraper'): McpServer | null {
@@ -2537,7 +2647,7 @@ export class GatewayStore {
     }
 
     // Encrypt at rest; plaintext never persisted in VaultEntry
-    this.encryptedSecrets.set(cleanKey, encryptSecret(plaintext.trim()));
+    this.encryptedSecrets.set(cleanKey, encryptSecret(plaintext.trim(), this.persistence.vaultKey));
     const masked = maskSecret(plaintext.trim());
     const now = new Date().toISOString();
 
@@ -2588,7 +2698,7 @@ export class GatewayStore {
     // Also redact any real user-stored secret in the encrypted Vault
     for (const enc of this.encryptedSecrets.values()) {
       try {
-        const plain = decryptSecret(enc);
+        const plain = decryptSecret(enc, this.persistence.vaultKey);
         if (plain.length >= 8 && output.includes(plain)) {
           output = output.split(plain).join('[REDACTED_BY_TOOLBOX]');
         }
@@ -2630,6 +2740,7 @@ export class GatewayStore {
 
   public pullFromGitHub(): { status: string; sync: SyncStatus } {
     this.sync.lastSyncedAt = new Date().toISOString();
+    this.scheduleSave();
     return { status: `已是最新：GitHub 远端 ${this.sync.branch} 分支没有新的改动。`, sync: this.sync };
   }
 
@@ -2673,9 +2784,155 @@ export class GatewayStore {
     return item;
   }
 
-  /**
-   * Executes a JSON-RPC 2.0 scenario or live MCP request through the real 5-stage middleware pipeline.
-   */
+  public async refreshMcpTools(serverId?: string) {
+    this.downstream.reconcile(this.servers);
+    for (const server of this.servers) {
+      if (server.state !== 'quarantined' && (server.connectOnStart === false || server.protocol !== 'stdio' || !server.enabled)) server.state = 'offline';
+    }
+    const active = this.servers.filter(s => (!serverId || s.id === serverId) && s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false);
+    await Promise.all(active.map(async server => {
+      try {
+        const tools = await this.downstream.list(server);
+        this.acceptDownstreamTools(server, tools);
+        this.scheduleSave();
+      } catch (error) {
+        console.error(`[mcp] ${server.id}: ${String(error)}`);
+        if (server.state !== 'quarantined') server.state = 'offline';
+      }
+    }));
+  }
+
+  private acceptDownstreamTools(server: McpServer, liveTools: Awaited<ReturnType<DownstreamMcp['list']>>) {
+    const lock = this.toolboxLock.get(server.id);
+    const corruptLock = !this.toolboxLock.valid;
+    if (!corruptLock && !lock) this.toolboxLock.writeServer(server.id, liveTools);
+    const locked = this.toolboxLock.get(server.id);
+    const mismatches = liveTools.filter(tool => corruptLock || !locked?.tools[tool.name] || locked.tools[tool.name] !== toolFingerprint(tool));
+    const previousTools = server.tools;
+    server.tools = liveTools.map(tool => {
+      const existing = server.tools.find(item => item.name === tool.name);
+      return {
+        name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
+        serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
+        readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
+        estimatedTokens: existing?.estimatedTokens || 100,
+        fingerprint: toolFingerprint(tool), lockedFingerprint: locked?.tools[tool.name] || '',
+      };
+    });
+    if (mismatches.length) {
+      server.state = 'quarantined';
+      for (const tool of mismatches) {
+        const baseline = previousTools.find(item => item.name === tool.name);
+        const expected = locked?.tools[tool.name] || '';
+        const actual = toolFingerprint(tool);
+        const previousRecord = this.quarantines.find(item => item.serverId === server.id && item.toolName === tool.name && item.actualHash === `sha256:${actual}`);
+        if (previousRecord) continue;
+        const baselineSchema = baseline?.inputSchema ? JSON.stringify(baseline.inputSchema, null, 2) : '';
+        const liveSchema = JSON.stringify(tool.inputSchema ?? {}, null, 2);
+        const record: QuarantineRecord = {
+          serverId: server.id,
+          toolName: tool.name,
+          expectedHash: `sha256:${expected}`,
+          actualHash: `sha256:${actual}`,
+          baselineDescription: baseline?.description || '',
+          mutatedDescription: tool.description || '',
+          baselineSchema,
+          mutatedSchema: liveSchema,
+          descriptionDiff: unifiedDiff('description', baseline?.description || '', tool.description || ''),
+          schemaDiff: unifiedDiff('inputSchema', baselineSchema, liveSchema),
+          riskReason: corruptLock ? 'toolbox.lock.json is invalid; real downstream is quarantined.' : 'Live tool schema differs from toolbox.lock.json.',
+          detectedAt: new Date().toISOString(),
+        };
+        this.quarantines = [record, ...this.quarantines.filter(item => item.serverId !== server.id || item.toolName !== tool.name)];
+      }
+      this.emitEvent('quarantine.detected', { serverId: server.id });
+    } else if (corruptLock) {
+      server.state = 'quarantined';
+    } else if (server.state !== 'quarantined') {
+      server.state = 'ok';
+    }
+    server.fingerprint = serverFingerprint(liveTools);
+  }
+
+  public async validateMcpTool(name: string) {
+    const server = this.servers.find(item => item.tools.some(tool => tool.name === name));
+    if (!server || server.protocol !== 'stdio' || server.connectOnStart === false) return;
+    try {
+      const liveTools = await this.downstream.list(server);
+      this.acceptDownstreamTools(server, liveTools);
+      this.scheduleSave();
+      if (server.state === 'quarantined') this.throwQuarantineError(server, name);
+    } catch (error) {
+      if (error instanceof RpcError) throw error;
+      throw new RpcError(-32006, String(error));
+    }
+  }
+
+  public async callDownstream(name: string, args: Record<string, unknown>) {
+    const server = this.servers.find(s => s.tools.some(t => t.name === name));
+    if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
+    if (server.state === 'quarantined') this.throwQuarantineError(server, name);
+    return this.downstream.call(server, name, args);
+  }
+
+  private throwQuarantineError(server: McpServer, toolName: string): never {
+    const record = this.quarantines.find(item => item.serverId === server.id && item.toolName === toolName);
+    const lockedFingerprint = record?.expectedHash.replace(/^sha256:/, '') || '';
+    const liveFingerprint = record?.actualHash.replace(/^sha256:/, '') || '';
+    throw new RpcError(-32001, 'Tool quarantined: schema hash mismatch', {
+      serverId: server.id, tool: toolName,
+      lockedFingerprint: lockedFingerprint.slice(0, 12), liveFingerprint: liveFingerprint.slice(0, 12),
+    });
+  }
+
+  public async closeMcpConnections() { this.downstream.close(); }
+
+  public getMcpTool(name: string, hostName: string) {
+    const meta = metaTools.find(t => t.name === name);
+    if (meta) return meta;
+    const server = this.servers.find(s => s.tools.some(t => t.name === name));
+    const tool = server?.tools.find(t => t.name === name);
+    if (!server || !tool) {
+      const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools).find(t => t.name === name);
+      if (attached) return { ...attached, inputSchema: attached.inputSchema || { type: 'object', properties: {} } };
+      throw new RpcError(-32602, 'Unknown tool');
+    }
+    const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
+    if (server.state === 'quarantined' && server.protocol === 'stdio' && server.connectOnStart !== false) this.throwQuarantineError(server, name);
+    if (host && host.scope !== 'full' && !tool.readOnly) throw new RpcError(-32003, 'Host scope forbids this tool');
+    if (tool.hitl && this.isMiddlewareEnabled('hitl')) throw new RpcError(-32002, 'Tool requires human approval before execution');
+    if (server.secretRef && this.isMiddlewareEnabled('vault') && !this.getVaultEntriesWithRefs().some(v => `vault://${v.key}` === server.secretRef && v.configured)) throw new RpcError(-32004, 'Required vault secret missing');
+    const budget = this.middleware.find(m => m.id === 'budget');
+    if (budget?.enabled && this.getMetrics().currentExposureTokens > (budget.config?.maxTokensPerTurn ?? 4000)) throw new RpcError(-32005, 'Token budget exceeded');
+    return { ...tool, inputSchema: tool.inputSchema || { type: 'object', properties: {} } };
+  }
+
+  public getMcpTools(hostName: string) {
+    const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
+    const visible = this.servers.filter(s => s.enabled)
+      .flatMap(s => s.tools.filter(t => t.mode === 'pinned' && (!host || host.scope === 'full' || t.readOnly)).map(t =>
+        s.state === 'quarantined' ? { ...t, description: `[QUARANTINED] ${t.description}` } : t));
+    const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools);
+    return [...metaTools, ...visible, ...attached].map(t => ({
+      name: t.name, description: t.description,
+      inputSchema: ('inputSchema' in t && t.inputSchema) || { type: 'object', properties: {} },
+    }));
+  }
+
+  public recordMcpCall(host: string, requestPayload: Record<string, unknown>, responsePayload: Record<string, unknown>, started: number) {
+    const event: AuditRpcEvent = {
+      id: crypto.randomUUID(), timestamp: nowTimeStr(), host,
+      method: String((requestPayload.params as Record<string, unknown>)?.name || requestPayload.method),
+      outcome: responsePayload.error ? 'blocked' : 'ok', latencyMs: Date.now() - started,
+      requestPayload: JSON.parse(this.redactSensitiveText(JSON.stringify(requestPayload))),
+      responsePayload: JSON.parse(this.redactSensitiveText(JSON.stringify(responsePayload))),
+    };
+    this.auditLogs.unshift(event);
+    this.auditLogs.length = Math.min(this.auditLogs.length, 60);
+    this.emitEvent('rpc.executed', event);
+  }
+
+  /** Sandbox demonstration only. MCP transports must use mcpHandler. */
   public executeRpc(params: {
     hostName: string;
     stepIndex?: number;
@@ -3151,7 +3408,7 @@ export class GatewayStore {
         return `vault://${keyName}`;
       }
       try {
-        return decryptSecret(enc);
+        return decryptSecret(enc, this.persistence.vaultKey);
       } catch {
         missingKeys.push(keyName);
         return `vault://${keyName}`;
@@ -3895,4 +4152,12 @@ export class GatewayStore {
   }
 }
 
-export const gatewayStore = new GatewayStore();
+let defaultGatewayStore: GatewayStore | undefined;
+
+export const gatewayStore: GatewayStore = new Proxy({} as GatewayStore, {
+  get(_target, property) {
+    defaultGatewayStore ??= new GatewayStore();
+    const value = Reflect.get(defaultGatewayStore, property, defaultGatewayStore);
+    return typeof value === 'function' ? value.bind(defaultGatewayStore) : value;
+  },
+});
