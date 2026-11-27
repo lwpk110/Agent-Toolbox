@@ -33,7 +33,7 @@ class StdioSession {
     this.child.on('error', error => fail(error.message));
     this.child.on('exit', (code, signal) => fail(`process exited (${signal || code})`));
     this.child.stdin.on('error', error => fail(error.message));
-    this.child.stderr.on('data', chunk => writeSync(2, `[downstream:${server.id}] ${chunk}`));
+    this.child.stderr.on('data', chunk => writeSync(2, `[downstream:${server.id}] ${String(chunk).replace(/(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]+)/g, '[REDACTED]')}`));
     createInterface({ input: this.child.stdout }).on('line', line => {
       try {
         const msg = JSON.parse(line);
@@ -66,7 +66,7 @@ class StdioSession {
         this.pending.delete(id);
         reject(new RpcError(-32006, `Downstream timeout: ${method}`));
         this.close();
-      }, 3000);
+      }, Number(process.env.TOOLBOX_DOWNSTREAM_TIMEOUT_MS) || 30000);
       this.pending.set(id, { resolve, reject, timer });
       this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
     });
@@ -77,16 +77,20 @@ class StdioSession {
 
 export class DownstreamMcp {
   private sessions = new Map<string, { signature: string; session: StdioSession }>();
-  constructor(private onDisconnect: (server: McpServer) => void, private onToolsChanged: (server: McpServer) => void = () => {}) {}
+  constructor(
+    private onDisconnect: (server: McpServer) => void,
+    private onToolsChanged: (server: McpServer) => void = () => {},
+    private resolveServer: (server: McpServer) => McpServer = server => server,
+  ) {}
 
   private async session(server: McpServer) {
     if (!server.enabled || server.protocol !== 'stdio' || server.connectOnStart === false) throw new RpcError(-32006, `Downstream ${server.id} is not connected`);
-    if (Object.values(server.env || {}).some(value => value.includes('vault://'))) throw new RpcError(-32004, `Downstream ${server.id} requires a configured secret`);
-    const signature = JSON.stringify([server.commandOrUrl, server.args, server.cwd, server.env]);
+    const resolvedServer = this.resolveServer(server);
+    const signature = JSON.stringify([resolvedServer.commandOrUrl, resolvedServer.args, resolvedServer.cwd, resolvedServer.env]);
     let entry = this.sessions.get(server.id);
     if (!entry || entry.signature !== signature) {
       entry?.session.close();
-      const session = new StdioSession(server, () => {
+      const session = new StdioSession(resolvedServer, () => {
         if (this.sessions.get(server.id)?.session === session) this.onDisconnect(server);
       }, () => this.onToolsChanged(server));
       entry = { signature, session };

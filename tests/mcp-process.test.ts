@@ -12,7 +12,7 @@ async function run(scenario: string) {
   const resultFile = path.join(dir, 'result.json');
   const lockFile = path.join(dir, 'toolbox.lock.json');
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('node', ['--import', 'tsx/esm', `tests/fixtures/${scenario}.ts`, resultFile], { env: { ...process.env, TOOLBOX_LOCK_FILE: lockFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('node', ['--import', 'tsx/esm', `tests/fixtures/${scenario}.ts`, resultFile], { env: { ...process.env, TOOLBOX_LOCK_FILE: lockFile, TOOLBOX_DOWNSTREAM_TIMEOUT_MS: '3000' }, stdio: ['ignore', 'pipe', 'pipe'] });
     let logs = '';
     child.stdout.on('data', b => { logs += String(b); });
     child.stderr.on('data', b => { logs += String(b); });
@@ -58,4 +58,18 @@ test('handshake failure and timeout fail closed while downstream tool errors ret
   expect(result.timeout.error.code).toBe(-32006);
   expect(result.toolError.result.isError).toBe(true);
   expect(JSON.parse(result.toolError.result.content[0].text).content[0].text).toBe('tool execution failed');
+});
+
+test('resolves a downstream Vault reference before spawn and returns -32004 without spawning when missing', async () => {
+  const result = await run('check-vault-downstream');
+  expect(result.missing.error.code).toBe(-32004);
+  expect(result.missingMarker).toBe(false);
+  expect(result.tokenMarker).toBe(true);
+  expect(result.logs).toEqual([]);
+  expect(result.serverTools).toContain('github_mcp__read_probe');
+  expect(result.tokenMarker).toBe(true);
+  expect(result.savedEnv.GITHUB_PERSONAL_ACCESS_TOKEN).toBe('vault://GITHUB_MCP_PAT');
+  expect(result.savedSecretRef).toBe('vault://GITHUB_MCP_PAT');
+  expect(/^[a-f0-9]{64}$/.test(result.lock.tools.read_probe)).toBe(true);
+  expect(result.stateText).not.toContain('github-mcp-test-token');
 });
