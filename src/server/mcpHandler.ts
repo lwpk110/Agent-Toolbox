@@ -70,6 +70,7 @@ export function createMcpHandler(store: GatewayStore) {
         case 'tools/call': {
           if (typeof params.name !== 'string' || (params.arguments !== undefined && !isObject(params.arguments))) throw new RpcError(-32602, 'Invalid tools/call params');
           const args = params.arguments || {};
+          if (!params.name.startsWith('toolbox__')) await store.validateMcpTool(params.name);
           const definition = store.getMcpTool(params.name, hostName);
           const schema = definition.inputSchema as any;
           validateArguments(args, schema);
@@ -81,7 +82,7 @@ export function createMcpHandler(store: GatewayStore) {
       }
       response = { jsonrpc: '2.0', id: msg.id, result };
     } catch (error) {
-      response = rpcError(msg.id, error instanceof RpcError ? error.code : -32603, error instanceof Error ? error.message : String(error));
+      response = rpcError(msg.id, error instanceof RpcError ? error.code : -32603, error instanceof Error ? error.message : String(error), error instanceof RpcError ? error.data : undefined);
     }
     if (msg.method === 'tools/call') store.recordMcpCall(hostName, msg, response, started);
     return response;

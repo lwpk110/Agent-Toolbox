@@ -78,6 +78,8 @@ export interface QuarantineRecord {
   mutatedDescription: string;
   baselineSchema?: string;
   mutatedSchema?: string;
+  descriptionDiff?: string;
+  schemaDiff?: string;
   riskReason: string;
   detectedAt: string;
 }
@@ -261,7 +263,7 @@ export interface AuditRpcEvent {
   host: string;
   method: string;
   stepIndex?: number;
-  outcome: 'ok' | 'blocked' | 'pending_approval';
+  outcome: 'ok' | 'blocked' | 'pending_approval' | 'trusted';
   latencyMs: number;
   requestPayload: Record<string, unknown>;
   responsePayload: Record<string, unknown>;

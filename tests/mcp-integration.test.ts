@@ -51,9 +51,10 @@ async function gateway() {
   const number = await port();
   const url = `http://127.0.0.1:${number}`;
   const dataFile = path.join(dir, 'state.json');
+  const lockFile = path.join(dir, 'toolbox.lock.json');
   let logs = '';
   async function start() {
-    const child = spawn('node', ['--import', 'tsx/esm', 'server.ts', '--production'], { env: { ...process.env, PORT: String(number), TOOLBOX_DATA_FILE: dataFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('node', ['--import', 'tsx/esm', 'server.ts', '--production'], { env: { ...process.env, PORT: String(number), TOOLBOX_DATA_FILE: dataFile, TOOLBOX_LOCK_FILE: lockFile }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child);
     child.stdout?.on('data', b => { logs += String(b); });
     child.stderr?.on('data', b => { logs += String(b); });

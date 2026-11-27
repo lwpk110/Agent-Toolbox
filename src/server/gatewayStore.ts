@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import path from 'node:path';
 import { RpcError } from './rpcError';
 import { DownstreamMcp } from './downstreamMcp';
+import { ToolboxLockFile, serverFingerprint, toolFingerprint, unifiedDiff } from './integrity';
 import { metaTools } from './metaTools';
 import { EventEmitter } from 'events';
 import { downstreamPool } from './downstreamPool';
@@ -493,9 +494,12 @@ export const SANDBOX_SCENARIOS = [
 export class GatewayStore {
   public readonly events = new EventEmitter();
   private readonly persistence: GatewayPersistence;
+  private readonly toolboxLock: ToolboxLockFile;
   private readonly downstream = new DownstreamMcp(server => {
-    server.state = 'offline';
+    if (server.state !== 'quarantined') server.state = 'offline';
     this.emitEvent('server.disconnected', { serverId: server.id });
+  }, server => {
+    void this.refreshMcpTools(server.id).catch(error => console.error(`[mcp] ${server.id} list_changed: ${String(error)}`));
   });
 
   private hosts: HostProfile[] = [
@@ -1300,8 +1304,9 @@ export class GatewayStore {
   private pendingApprovals: HitlApproval[] = [];
   private auditLogs: AuditRpcEvent[] = [];
 
-  constructor(options: { dataFile?: string } = {}) {
+  constructor(options: { dataFile?: string; lockFile?: string } = {}) {
     this.persistence = new GatewayPersistence(options.dataFile);
+    this.toolboxLock = new ToolboxLockFile(options.lockFile);
     process.once('exit', () => this.downstream.close());
     const saved = this.persistence.load();
     if (saved) {
@@ -2051,33 +2056,57 @@ export class GatewayStore {
     return null;
   }
 
-  public resolveQuarantine(serverId: string, action: 'rollback' | 'trust'): McpServer | null {
+  public async resolveQuarantine(serverId: string, action: 'rollback' | 'trust'): Promise<{ server: McpServer | null; conflict?: boolean; error?: string }> {
     const server = this.servers.find((s) => s.id === serverId);
-    if (!server) return null;
-    const rec = this.quarantines.find((q) => q.serverId === serverId);
-
-    if (action === 'rollback') {
-      const safeHash = rec ? rec.expectedHash.replace(/^sha256:/, '') : '7d11e4';
+    if (!server) return { server: null };
+    const isRealDownstream = server.protocol === 'stdio' && server.connectOnStart !== false && server.enabled;
+    if (!isRealDownstream) {
+      const record = this.quarantines.find(item => item.serverId === serverId);
+      const hash = action === 'rollback'
+        ? record?.expectedHash.replace(/^sha256:/, '') || '7d11e4'
+        : record?.actualHash.replace(/^sha256:/, '') || server.fingerprint;
       server.state = 'ok';
-      server.fingerprint = safeHash;
-      for (const t of server.tools) {
-        t.fingerprint = safeHash;
-        t.lockedFingerprint = safeHash;
+      server.fingerprint = hash;
+      for (const tool of server.tools) {
+        tool.fingerprint = hash;
+        tool.lockedFingerprint = hash;
       }
     } else {
-      const newHash = rec ? rec.actualHash.replace(/^sha256:/, '') : server.fingerprint;
-      server.state = 'ok';
-      server.fingerprint = newHash;
-      for (const t of server.tools) {
-        t.fingerprint = newHash;
-        t.lockedFingerprint = newHash;
+      try {
+        const liveTools = await this.downstream.list(server);
+        if (action === 'rollback') {
+          const lock = this.toolboxLock.get(serverId);
+          const differs = !this.toolboxLock.valid || !lock || liveTools.some(tool => !lock.tools[tool.name] || lock.tools[tool.name] !== toolFingerprint(tool));
+          this.acceptDownstreamTools(server, liveTools);
+          if (differs) {
+            this.scheduleSave();
+            return { server, conflict: true };
+          }
+          server.state = 'ok';
+        } else {
+          this.toolboxLock.writeServer(serverId, liveTools);
+          this.acceptDownstreamTools(server, liveTools);
+        }
+      } catch (error) {
+        console.error(`[quarantine] Could not verify ${serverId} during ${action}: ${String(error)}`);
+        return { server, conflict: true, error: action === 'trust' ? 'toolbox.lock.json is invalid' : undefined };
       }
-      this.markDirty();
     }
-
+    if (action === 'rollback' && server.state === 'quarantined') return { server, conflict: true };
+    if (action === 'trust') this.markDirty();
+    server.state = 'ok';
     this.quarantines = this.quarantines.filter((q) => q.serverId !== serverId);
+    if (action === 'trust') {
+      const audit: AuditRpcEvent = {
+        id: crypto.randomUUID(), timestamp: nowTimeStr(), host: 'Local Operator',
+        method: `quarantine.resolve:${serverId}`, outcome: 'trusted', latencyMs: 0,
+        requestPayload: { serverId, action }, responsePayload: { serverId, outcome: 'trusted' },
+      };
+      this.auditLogs.unshift(audit);
+      this.auditLogs.length = Math.min(this.auditLogs.length, 60);
+    }
     this.emitEvent('quarantine.resolved', { serverId, action });
-    return server;
+    return { server };
   }
 
   public simulateQuarantine(serverId = 'scraper'): McpServer | null {
@@ -2755,34 +2784,105 @@ export class GatewayStore {
     return item;
   }
 
-  public async refreshMcpTools() {
+  public async refreshMcpTools(serverId?: string) {
     this.downstream.reconcile(this.servers);
     for (const server of this.servers) {
       if (server.state !== 'quarantined' && (server.connectOnStart === false || server.protocol !== 'stdio' || !server.enabled)) server.state = 'offline';
     }
-    const active = this.servers.filter(s => s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false && s.state !== 'quarantined');
+    const active = this.servers.filter(s => (!serverId || s.id === serverId) && s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false);
     await Promise.all(active.map(async server => {
       try {
         const tools = await this.downstream.list(server);
-        server.tools = tools.map(tool => {
-          const existing = server.tools.find(t => t.name === tool.name);
-          return {
-            name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
-            serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
-            readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
-            estimatedTokens: existing?.estimatedTokens || 100, fingerprint: existing?.fingerprint || '', lockedFingerprint: existing?.lockedFingerprint || '',
-          };
-        });
-        server.state = 'ok';
+        this.acceptDownstreamTools(server, tools);
         this.scheduleSave();
-      } catch (error) { console.error(`[mcp] ${server.id}: ${String(error)}`); server.state = 'offline'; }
+      } catch (error) {
+        console.error(`[mcp] ${server.id}: ${String(error)}`);
+        if (server.state !== 'quarantined') server.state = 'offline';
+      }
     }));
+  }
+
+  private acceptDownstreamTools(server: McpServer, liveTools: Awaited<ReturnType<DownstreamMcp['list']>>) {
+    const lock = this.toolboxLock.get(server.id);
+    const corruptLock = !this.toolboxLock.valid;
+    if (!corruptLock && !lock) this.toolboxLock.writeServer(server.id, liveTools);
+    const locked = this.toolboxLock.get(server.id);
+    const mismatches = liveTools.filter(tool => corruptLock || !locked?.tools[tool.name] || locked.tools[tool.name] !== toolFingerprint(tool));
+    const previousTools = server.tools;
+    server.tools = liveTools.map(tool => {
+      const existing = server.tools.find(item => item.name === tool.name);
+      return {
+        name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
+        serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
+        readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
+        estimatedTokens: existing?.estimatedTokens || 100,
+        fingerprint: toolFingerprint(tool), lockedFingerprint: locked?.tools[tool.name] || '',
+      };
+    });
+    if (mismatches.length) {
+      server.state = 'quarantined';
+      for (const tool of mismatches) {
+        const baseline = previousTools.find(item => item.name === tool.name);
+        const expected = locked?.tools[tool.name] || '';
+        const actual = toolFingerprint(tool);
+        const previousRecord = this.quarantines.find(item => item.serverId === server.id && item.toolName === tool.name && item.actualHash === `sha256:${actual}`);
+        if (previousRecord) continue;
+        const baselineSchema = baseline?.inputSchema ? JSON.stringify(baseline.inputSchema, null, 2) : '';
+        const liveSchema = JSON.stringify(tool.inputSchema ?? {}, null, 2);
+        const record: QuarantineRecord = {
+          serverId: server.id,
+          toolName: tool.name,
+          expectedHash: `sha256:${expected}`,
+          actualHash: `sha256:${actual}`,
+          baselineDescription: baseline?.description || '',
+          mutatedDescription: tool.description || '',
+          baselineSchema,
+          mutatedSchema: liveSchema,
+          descriptionDiff: unifiedDiff('description', baseline?.description || '', tool.description || ''),
+          schemaDiff: unifiedDiff('inputSchema', baselineSchema, liveSchema),
+          riskReason: corruptLock ? 'toolbox.lock.json is invalid; real downstream is quarantined.' : 'Live tool schema differs from toolbox.lock.json.',
+          detectedAt: new Date().toISOString(),
+        };
+        this.quarantines = [record, ...this.quarantines.filter(item => item.serverId !== server.id || item.toolName !== tool.name)];
+      }
+      this.emitEvent('quarantine.detected', { serverId: server.id });
+    } else if (corruptLock) {
+      server.state = 'quarantined';
+    } else if (server.state !== 'quarantined') {
+      server.state = 'ok';
+    }
+    server.fingerprint = serverFingerprint(liveTools);
+  }
+
+  public async validateMcpTool(name: string) {
+    const server = this.servers.find(item => item.tools.some(tool => tool.name === name));
+    if (!server || server.protocol !== 'stdio' || server.connectOnStart === false) return;
+    try {
+      const liveTools = await this.downstream.list(server);
+      this.acceptDownstreamTools(server, liveTools);
+      this.scheduleSave();
+      if (server.state === 'quarantined') this.throwQuarantineError(server, name);
+    } catch (error) {
+      if (error instanceof RpcError) throw error;
+      throw new RpcError(-32006, String(error));
+    }
   }
 
   public async callDownstream(name: string, args: Record<string, unknown>) {
     const server = this.servers.find(s => s.tools.some(t => t.name === name));
     if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
+    if (server.state === 'quarantined') this.throwQuarantineError(server, name);
     return this.downstream.call(server, name, args);
+  }
+
+  private throwQuarantineError(server: McpServer, toolName: string): never {
+    const record = this.quarantines.find(item => item.serverId === server.id && item.toolName === toolName);
+    const lockedFingerprint = record?.expectedHash.replace(/^sha256:/, '') || '';
+    const liveFingerprint = record?.actualHash.replace(/^sha256:/, '') || '';
+    throw new RpcError(-32001, 'Tool quarantined: schema hash mismatch', {
+      serverId: server.id, tool: toolName,
+      lockedFingerprint: lockedFingerprint.slice(0, 12), liveFingerprint: liveFingerprint.slice(0, 12),
+    });
   }
 
   public async closeMcpConnections() { this.downstream.close(); }
@@ -2798,7 +2898,7 @@ export class GatewayStore {
       throw new RpcError(-32602, 'Unknown tool');
     }
     const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
-    if (server.state === 'quarantined' && this.isMiddlewareEnabled('quarantine')) throw new RpcError(-32001, 'Tool quarantined');
+    if (server.state === 'quarantined' && server.protocol === 'stdio' && server.connectOnStart !== false) this.throwQuarantineError(server, name);
     if (host && host.scope !== 'full' && !tool.readOnly) throw new RpcError(-32003, 'Host scope forbids this tool');
     if (tool.hitl && this.isMiddlewareEnabled('hitl')) throw new RpcError(-32002, 'Tool requires human approval before execution');
     if (server.secretRef && this.isMiddlewareEnabled('vault') && !this.getVaultEntriesWithRefs().some(v => `vault://${v.key}` === server.secretRef && v.configured)) throw new RpcError(-32004, 'Required vault secret missing');
@@ -2809,8 +2909,9 @@ export class GatewayStore {
 
   public getMcpTools(hostName: string) {
     const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
-    const visible = this.servers.filter(s => s.enabled && s.state !== 'quarantined')
-      .flatMap(s => s.tools.filter(t => t.mode === 'pinned' && (!host || host.scope === 'full' || t.readOnly)));
+    const visible = this.servers.filter(s => s.enabled)
+      .flatMap(s => s.tools.filter(t => t.mode === 'pinned' && (!host || host.scope === 'full' || t.readOnly)).map(t =>
+        s.state === 'quarantined' ? { ...t, description: `[QUARANTINED] ${t.description}` } : t));
     const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools);
     return [...metaTools, ...visible, ...attached].map(t => ({
       name: t.name, description: t.description,

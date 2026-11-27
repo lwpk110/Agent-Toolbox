@@ -577,15 +577,19 @@ app.patch('/api/v1/tools/:toolName', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
-app.post('/api/v1/quarantine/:serverId/resolve', (req, res) => {
+app.post('/api/v1/quarantine/:serverId/resolve', async (req, res) => {
   const action = req.body?.action;
   if (action !== 'rollback' && action !== 'trust') {
     sendErr(res, 400, 'INVALID_ACTION', '仅支持 rollback 或 trust 处置动作。');
     return;
   }
-  const resolved = gatewayStore.resolveQuarantine(req.params.serverId, action);
-  if (!resolved) {
+  const resolved = await gatewayStore.resolveQuarantine(req.params.serverId, action);
+  if (!resolved.server) {
     sendErr(res, 404, 'SERVER_NOT_FOUND', '未找到待处置的隔离服务。');
+    return;
+  }
+  if (resolved.conflict) {
+    res.status(409).json({ error: resolved.error || 'live schema still differs from lock' });
     return;
   }
   sendOk(res, gatewayStore.getSnapshot());
@@ -977,7 +981,7 @@ function attachMcpNotificationStream(req: express.Request, res: express.Response
   }
 
   const onEvent = (evt: { type: string; payload: unknown }) => {
-    if (evt.type === 'skill.mounted' || evt.type === 'skill.unmounted' || evt.type === 'tool.updated' || evt.type.startsWith('server.')) {
+    if (evt.type === 'skill.mounted' || evt.type === 'skill.unmounted' || evt.type === 'tool.updated' || evt.type.startsWith('server.') || evt.type.startsWith('quarantine.')) {
       const notification = {
         jsonrpc: '2.0',
         method: 'notifications/tools/list_changed',

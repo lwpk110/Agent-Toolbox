@@ -10,8 +10,9 @@ async function run(scenario: string) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-process-'));
   dirs.push(dir);
   const resultFile = path.join(dir, 'result.json');
+  const lockFile = path.join(dir, 'toolbox.lock.json');
   await new Promise<void>((resolve, reject) => {
-    const child = spawn('node', ['--import', 'tsx/esm', `tests/fixtures/${scenario}.ts`, resultFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('node', ['--import', 'tsx/esm', `tests/fixtures/${scenario}.ts`, resultFile], { env: { ...process.env, TOOLBOX_LOCK_FILE: lockFile }, stdio: ['ignore', 'pipe', 'pipe'] });
     let logs = '';
     child.stdout.on('data', b => { logs += String(b); });
     child.stderr.on('data', b => { logs += String(b); });

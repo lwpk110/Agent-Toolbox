@@ -18,7 +18,7 @@ class StdioSession {
   private pending = new Map<number, { resolve: (result: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   readonly ready: Promise<void>;
 
-  constructor(server: McpServer, onDisconnect: () => void) {
+  constructor(server: McpServer, onDisconnect: () => void, onToolsChanged: () => void) {
     this.child = spawn(server.commandOrUrl, server.args || [], {
       cwd: server.cwd, env: { ...process.env, ...server.env }, stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -37,6 +37,10 @@ class StdioSession {
     createInterface({ input: this.child.stdout }).on('line', line => {
       try {
         const msg = JSON.parse(line);
+        if (msg.jsonrpc === '2.0' && !('id' in msg) && msg.method === 'notifications/tools/list_changed') {
+          onToolsChanged();
+          return;
+        }
         const p = this.pending.get(msg.id);
         if (!p) return;
         if (msg.jsonrpc !== '2.0' || (!('result' in msg) && !msg.error)) { fail('invalid JSON-RPC response'); return; }
@@ -73,7 +77,7 @@ class StdioSession {
 
 export class DownstreamMcp {
   private sessions = new Map<string, { signature: string; session: StdioSession }>();
-  constructor(private onDisconnect: (server: McpServer) => void) {}
+  constructor(private onDisconnect: (server: McpServer) => void, private onToolsChanged: (server: McpServer) => void = () => {}) {}
 
   private async session(server: McpServer) {
     if (!server.enabled || server.protocol !== 'stdio' || server.connectOnStart === false) throw new RpcError(-32006, `Downstream ${server.id} is not connected`);
@@ -84,7 +88,7 @@ export class DownstreamMcp {
       entry?.session.close();
       const session = new StdioSession(server, () => {
         if (this.sessions.get(server.id)?.session === session) this.onDisconnect(server);
-      });
+      }, () => this.onToolsChanged(server));
       entry = { signature, session };
       this.sessions.set(server.id, entry);
     }
