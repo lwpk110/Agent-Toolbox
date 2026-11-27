@@ -39,6 +39,66 @@ test('hides demo entities from the default snapshot while retaining fixture and 
   expect(store.getSnapshot().servers.find((server) => server.id === 'github')?.origin).toBe('demo');
 });
 
+test('preflight and sync manifest include only entities visible under the current settings', () => {
+  const store = makeStore(false, false);
+  const preflight = store.getPreflight();
+  const checks = Object.fromEntries(preflight.checks.map((check) => [check.id, check]));
+  const manifest = JSON.parse(preflight.manifestJson);
+  const lockfile = JSON.parse(preflight.lockfileJson);
+
+  expect(checks['vault-complete'].passed).toBe(true);
+  expect(checks['no-quarantine'].passed).toBe(true);
+  expect(manifest.servers.map((server: { id: string }) => server.id)).not.toContain('fixture');
+  expect(manifest.servers.map((server: { id: string }) => server.id)).not.toContain('github');
+  expect(Object.keys(lockfile.skills)).not.toContain('sql-query-optimizer');
+  expect(store.getSnapshot().metrics.missingVaultKeys).toBe(0);
+  expect(store.getSnapshot().metrics.quarantinedCount).toBe(0);
+});
+
+test('migrates every seeded skill and memory to demo origin in legacy persisted state', async () => {
+  const store = makeStore(true);
+  const directory = directories[directories.length - 1];
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const dataFile = path.join(directory, 'state.json');
+  const legacy = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  for (const skill of legacy.skills) skill.origin = 'real';
+  for (const memory of legacy.memories) memory.origin = 'real';
+  legacy.visibility = { showDemo: false, showFixtures: true };
+  fs.writeFileSync(dataFile, JSON.stringify(legacy));
+
+  const migrated = new GatewayStore({ dataFile, lockFile: path.join(directory, 'toolbox.lock.json') });
+  const state = migrated.getSnapshot();
+  const visibleSkillIds = state.skills.map((skill) => skill.id);
+  const visibleMemoryIds = state.memories.map((memory) => memory.id);
+  for (const id of ['sql-query-optimizer', 'mcp-diagnostics-prober', 'docs-writer', 'git-release-helper']) {
+    expect(visibleSkillIds).not.toContain(id);
+  }
+  for (const id of ['mem-1', 'mem-2', 'mem-3', 'mem-4']) {
+    expect(visibleMemoryIds).not.toContain(id);
+  }
+});
+
+test('hides fixture audit and quarantine records when fixtures are disabled', async () => {
+  const store = makeStore(true, true);
+  const directory = directories[directories.length - 1];
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const dataFile = path.join(directory, 'state.json');
+  const persisted = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  persisted.quarantines.push({ serverId: 'fixture', toolName: 'fixture__echo', origin: 'fixture' });
+  persisted.auditLogs.push({
+    id: 'fixture-event',
+    requestPayload: { params: { name: 'fixture__echo' } },
+    origin: 'fixture',
+  });
+  fs.writeFileSync(dataFile, JSON.stringify(persisted));
+
+  const restarted = new GatewayStore({ dataFile, lockFile: path.join(directory, 'toolbox.lock.json') });
+  restarted.setVisibility({ showFixtures: false });
+  const state = restarted.getSnapshot();
+  expect(state.quarantines.some((record) => record.serverId === 'fixture')).toBe(false);
+  expect(state.auditLogs.some((event) => event.id === 'fixture-event')).toBe(false);
+});
+
 test('persists visibility settings and filters MCP tools independently of display visibility', async () => {
   const store = makeStore(true, true);
   const handler = createMcpHandler(store);

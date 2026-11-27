@@ -1382,16 +1382,30 @@ export class GatewayStore {
     let changed = false;
     const demoServerIds = new Set(['github', 'scraper', 'postgres', 'brave', 'slack']);
     const demoHostIds = new Set(['antigravity', 'claude']);
-    const demoSkillIds = new Set(['ast-code-refactor', 'security-owasp-auditor', 'api-contract-tester', 'incident-runbook', 'sql-performance-tuner', 'release-notes-writer']);
+    const demoSkillIds = new Set([
+      'ast-code-refactor',
+      'security-owasp-auditor',
+      'sql-query-optimizer',
+      'mcp-diagnostics-prober',
+      'docs-writer',
+      'git-release-helper',
+    ]);
+    const demoMemoryIds = new Set(['mem-1', 'mem-2', 'mem-3', 'mem-4']);
     for (const host of this.hosts) if (!host.origin) { host.origin = demoHostIds.has(host.id) ? 'demo' : 'real'; changed = true; }
     for (const server of this.servers) {
       if (!server.origin) { server.origin = server.id === 'fixture' ? 'fixture' : demoServerIds.has(server.id) ? 'demo' : 'real'; changed = true; }
       for (const tool of server.tools) if (!tool.origin) { tool.origin = server.origin; changed = true; }
     }
-    for (const skill of this.skills) if (!skill.origin) { skill.origin = demoSkillIds.has(skill.id) ? 'demo' : 'real'; changed = true; }
+    for (const skill of this.skills) {
+      const origin = demoSkillIds.has(skill.id) ? 'demo' : skill.origin || 'real';
+      if (skill.origin !== origin) { skill.origin = origin; changed = true; }
+    }
     for (const record of this.quarantines) if (!record.origin) { record.origin = this.servers.find(server => server.id === record.serverId)?.origin || 'real'; changed = true; }
     for (const doc of this.docs) if (!doc.origin) { doc.origin = doc.sourceType === 'builtin' ? 'demo' : 'real'; changed = true; }
-    for (const memory of this.memories) if (!memory.origin) { memory.origin = 'real'; changed = true; }
+    for (const memory of this.memories) {
+      const origin = demoMemoryIds.has(memory.id) ? 'demo' : memory.origin || 'real';
+      if (memory.origin !== origin) { memory.origin = origin; changed = true; }
+    }
     for (const vault of this.vaultEntries) if (!vault.origin) { vault.origin = ['GITHUB_PERSONAL_TOKEN', 'POSTGRES_PROD_DSN', 'BRAVE_SEARCH_API_KEY', 'SLACK_BOT_TOKEN'].includes(vault.key) ? 'demo' : 'real'; changed = true; }
     for (const event of this.auditLogs) {
       const toolName = String((event.requestPayload.params as Record<string, unknown> | undefined)?.name || '');
@@ -1415,7 +1429,9 @@ export class GatewayStore {
   }
 
   private isOriginVisible(origin: DataOrigin | undefined): boolean {
-    return origin !== 'demo' || this.visibility.showDemo;
+    if (origin === 'demo') return this.visibility.showDemo;
+    if (origin === 'fixture') return this.visibility.showFixtures;
+    return true;
   }
 
   private scheduleSave(): void {
@@ -1484,18 +1500,27 @@ export class GatewayStore {
   }
 
   public getPreflight(): SyncPreflightResult {
-    const missing = this.vaultEntries.filter((v) => !v.configured);
-    const quarantined = this.servers.filter((s) => s.state === 'quarantined');
+    const hosts = this.hosts.filter((host) => this.isOriginVisible(host.origin));
+    const servers = this.servers
+      .filter((server) => this.isOriginVisible(server.origin))
+      .map((server) => ({
+        ...server,
+        tools: server.tools.filter((tool) => this.isOriginVisible(tool.origin || server.origin)),
+      }));
+    const skills = this.skills.filter((skill) => this.isOriginVisible(skill.origin));
+    const vault = this.getVaultEntriesWithRefs().filter((entry) => this.isOriginVisible(entry.origin));
+    const missing = vault.filter((entry) => !entry.configured);
+    const quarantined = servers.filter((server) => server.state === 'quarantined');
 
     const manifestObj = {
       schemaVersion: '1.0',
       gateway: {
         exposureStrategy: 'hybrid-lazy',
-        secretRefs: this.vaultEntries.map((v) => `vault://${v.key}`),
+        secretRefs: vault.map((v) => `vault://${v.key}`),
       },
-      hosts: Object.fromEntries(this.hosts.map((h) => [h.id, { scope: h.scope }])),
-      mountedSkills: this.skills.filter((s) => s.mounted).map((s) => s.id),
-      servers: this.servers.map((s) => ({
+      hosts: Object.fromEntries(hosts.map((h) => [h.id, { scope: h.scope }])),
+      mountedSkills: skills.filter((s) => s.mounted).map((s) => s.id),
+      servers: servers.map((s) => ({
         id: s.id,
         protocol: s.protocol,
         pinnedTools: s.tools.filter((t) => t.mode === 'pinned').map((t) => t.name),
@@ -1505,10 +1530,10 @@ export class GatewayStore {
     const lockfileObj = {
       schemaVersion: '1.1',
       tools: Object.fromEntries(
-        this.servers.flatMap((s) => s.tools.map((t) => [t.name, `sha256:${t.lockedFingerprint}`]))
+        servers.flatMap((s) => s.tools.map((t) => [t.name, `sha256:${t.lockedFingerprint}`]))
       ),
       skills: Object.fromEntries(
-        this.skills.map((s) => [
+        skills.map((s) => [
           s.id,
           {
             bundleHash: `sha256:${s.fingerprint}`,
