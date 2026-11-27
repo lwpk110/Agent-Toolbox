@@ -3,7 +3,7 @@ import type { GatewayStateSnapshot } from '../types/toolbox';
 import { DOC_CATEGORIES, type DocDetail, type DocMeta } from '../types/docs';
 import { api } from '../lib/api';
 import { ProtoIcon } from './ProtoIcon';
-import { ProtoMore, ProtoSeg, ProtoStatus } from './ProtoPrimitives';
+import { DataOriginTag, ProtoMore, ProtoSeg, ProtoStatus } from './ProtoPrimitives';
 import { MarkdownViewer } from './MarkdownViewer';
 import { DiagramLightbox } from './DiagramLightbox';
 
@@ -483,7 +483,7 @@ export function SandboxDocsView({
                         >
                           <td className="mono small">{l.timestamp}</td>
                           <td>{l.host}</td>
-                          <td className="mono small">{l.method}</td>
+                          <td className="mono small">{l.method} <DataOriginTag origin={l.origin} /></td>
                           <td>
                             {l.outcome === 'blocked' ? (
                               <ProtoStatus kind="bad" text="已拦截" />

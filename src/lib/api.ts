@@ -3,6 +3,7 @@ import type {
   CodexTargetPlatform,
   ExposureMode,
   GatewayStateSnapshot,
+  VisibilitySettings,
   HostScope,
   MiddlewareId,
   SkillSourceType,
@@ -33,6 +34,12 @@ async function requestJson<T>(url: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   getState: () => requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/state').then((r) => r.data),
+
+  updateVisibility: (patch: Partial<VisibilitySettings>) =>
+    requestJson<{ ok: true; data: VisibilitySettings }>('/api/v1/settings/visibility', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }).then((r) => r.data),
 
   addHost: (payload: { name: string; scope: HostScope; transport?: 'stdio' | 'sse' }) =>
     requestJson<{ ok: true; hostId?: string; data: GatewayStateSnapshot }>('/api/v1/hosts', {

@@ -22,6 +22,12 @@ export function ProtoStatus({
   );
 }
 
+export function DataOriginTag({ origin }: { origin?: 'real' | 'demo' | 'fixture' }) {
+  if (origin === 'demo') return <span className="origin-tag demo">演示</span>;
+  if (origin === 'fixture') return <span className="origin-tag fixture">测试</span>;
+  return null;
+}
+
 export function ProtoTip({
   label,
   text,

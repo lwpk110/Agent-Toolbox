@@ -13,6 +13,7 @@ import type {
   DocUpdatePoint,
   DualLayerSkill,
   ExposureMode,
+  DataOrigin,
   GatewayStateSnapshot,
   GatewaySummaryMetrics,
   HitlApproval,
@@ -37,6 +38,7 @@ import type {
   SyncPreflightResult,
   SyncStatus,
   TransportProtocol,
+  VisibilitySettings,
   TrinitySearchResult,
   VaultEntry,
   VectorDimensionBucket,
@@ -322,6 +324,7 @@ function createSeededSkill(input: {
     input.estimatedTokens
   );
   return {
+    origin: 'demo',
     id: input.id,
     version: input.version,
     summary: input.summary,
@@ -589,7 +592,11 @@ export class GatewayStore {
     {
       id: 'fixture', name: 'fixture', protocol: 'stdio', commandOrUrl: 'node',
       args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/echo-mcp.ts')], cwd: process.cwd(),
-      enabled: true, state: 'offline', latencyMs: 0, fingerprint: '', tools: [], resources: [], prompts: [],
+      enabled: true, state: 'offline', latencyMs: 0, fingerprint: '', tools: [{
+        name: 'fixture__echo', serverId: 'fixture', description: 'Echo text from the test fixture downstream',
+        estimatedTokens: 100, mode: 'pinned', hitl: false, fingerprint: '', lockedFingerprint: '', readOnly: true,
+        inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+      }], resources: [], prompts: [],
     },
     {
       id: 'github',
@@ -1303,6 +1310,10 @@ export class GatewayStore {
 
   private pendingApprovals: HitlApproval[] = [];
   private auditLogs: AuditRpcEvent[] = [];
+  private visibility: VisibilitySettings = {
+    showDemo: process.env.TOOLBOX_DEMO_DATA === 'on',
+    showFixtures: process.env.TOOLBOX_FIXTURE !== 'off',
+  };
 
   constructor(options: { dataFile?: string; lockFile?: string } = {}) {
     this.persistence = new GatewayPersistence(options.dataFile);
@@ -1321,6 +1332,7 @@ export class GatewayStore {
       }
     }
     else this.scheduleSave();
+    this.applyOriginMigration();
     const codex = this.hosts.find(h => h.id === 'codex');
     if (codex) codex.configSnippet = codexConfigSnippet();
   }
@@ -1342,6 +1354,7 @@ export class GatewayStore {
       lastSyncedManifestJson: this.lastSyncedManifestJson,
       pendingApprovals: this.pendingApprovals,
       auditLogs: this.auditLogs,
+      visibility: this.visibility,
     };
   }
 
@@ -1353,9 +1366,56 @@ export class GatewayStore {
     if (saved.vectorHealth && typeof saved.vectorHealth === 'object') this.vectorHealth = saved.vectorHealth as VectorHealthStats;
     if (saved.sync && typeof saved.sync === 'object') this.sync = saved.sync as SyncStatus;
     if (typeof saved.lastSyncedManifestJson === 'string') this.lastSyncedManifestJson = saved.lastSyncedManifestJson;
+    if (saved.visibility && typeof saved.visibility === 'object') {
+      const visibility = saved.visibility as Partial<VisibilitySettings>;
+      this.visibility = {
+        showDemo: typeof visibility.showDemo === 'boolean' ? visibility.showDemo : this.visibility.showDemo,
+        showFixtures: typeof visibility.showFixtures === 'boolean' ? visibility.showFixtures : this.visibility.showFixtures,
+      };
+    }
     if (saved.encryptedSecrets && typeof saved.encryptedSecrets === 'object' && !Array.isArray(saved.encryptedSecrets)) {
       this.encryptedSecrets = new Map(Object.entries(saved.encryptedSecrets as Record<string, EncryptedSecret>));
     }
+  }
+
+  private applyOriginMigration(): void {
+    let changed = false;
+    const demoServerIds = new Set(['github', 'scraper', 'postgres', 'brave', 'slack']);
+    const demoHostIds = new Set(['antigravity', 'claude']);
+    const demoSkillIds = new Set(['ast-code-refactor', 'security-owasp-auditor', 'api-contract-tester', 'incident-runbook', 'sql-performance-tuner', 'release-notes-writer']);
+    for (const host of this.hosts) if (!host.origin) { host.origin = demoHostIds.has(host.id) ? 'demo' : 'real'; changed = true; }
+    for (const server of this.servers) {
+      if (!server.origin) { server.origin = server.id === 'fixture' ? 'fixture' : demoServerIds.has(server.id) ? 'demo' : 'real'; changed = true; }
+      for (const tool of server.tools) if (!tool.origin) { tool.origin = server.origin; changed = true; }
+    }
+    for (const skill of this.skills) if (!skill.origin) { skill.origin = demoSkillIds.has(skill.id) ? 'demo' : 'real'; changed = true; }
+    for (const record of this.quarantines) if (!record.origin) { record.origin = this.servers.find(server => server.id === record.serverId)?.origin || 'real'; changed = true; }
+    for (const doc of this.docs) if (!doc.origin) { doc.origin = doc.sourceType === 'builtin' ? 'demo' : 'real'; changed = true; }
+    for (const memory of this.memories) if (!memory.origin) { memory.origin = 'real'; changed = true; }
+    for (const vault of this.vaultEntries) if (!vault.origin) { vault.origin = ['GITHUB_PERSONAL_TOKEN', 'POSTGRES_PROD_DSN', 'BRAVE_SEARCH_API_KEY', 'SLACK_BOT_TOKEN'].includes(vault.key) ? 'demo' : 'real'; changed = true; }
+    for (const event of this.auditLogs) {
+      const toolName = String((event.requestPayload.params as Record<string, unknown> | undefined)?.name || '');
+      event.origin ||= toolName.startsWith('toolbox__') ? 'real' : this.servers.find(server => server.tools.some(tool => tool.name === toolName))?.origin || 'real';
+    }
+    if (changed) this.scheduleSave();
+  }
+
+  public getVisibility(): VisibilitySettings {
+    return { ...this.visibility };
+  }
+
+  public setVisibility(patch: Partial<VisibilitySettings>): VisibilitySettings {
+    this.visibility = { ...this.visibility, ...patch };
+    this.emitEvent('settings.changed', this.getVisibility());
+    return this.getVisibility();
+  }
+
+  public assertDemoEnabled(): void {
+    if (!this.visibility.showDemo) throw new RpcError(-32013, 'DEMO_DISABLED');
+  }
+
+  private isOriginVisible(origin: DataOrigin | undefined): boolean {
+    return origin !== 'demo' || this.visibility.showDemo;
   }
 
   private scheduleSave(): void {
@@ -1380,16 +1440,16 @@ export class GatewayStore {
     return this.middleware.find((m) => m.id === id)?.enabled ?? false;
   }
 
-  public getMetrics(): GatewaySummaryMetrics {
+  public getMetrics(servers = this.servers, skills = this.skills, quarantines = this.quarantines, vaultEntries = this.vaultEntries): GatewaySummaryMetrics {
     let currentExposureTokens = META_TOOLS_TOKENS;
     let totalTools = 0;
     let quarantinedCount = 0;
 
     let enabledServers = 0;
-    for (const s of this.servers) {
+    for (const s of servers) {
       totalTools += s.tools.length;
       if (s.state === 'quarantined') {
-        quarantinedCount += 1;
+      quarantinedCount += 1;
         continue;
       }
       if (!s.enabled) {
@@ -1403,22 +1463,23 @@ export class GatewayStore {
       }
     }
 
-    const savedRatio = Math.max(0, 1 - currentExposureTokens / FULL_EXPOSURE_TOKENS);
+    const fullExposureTokens = Math.max(META_TOOLS_TOKENS, currentExposureTokens);
+    const savedRatio = Math.max(0, 1 - currentExposureTokens / fullExposureTokens);
     const savedPercentage = `${(savedRatio * 100).toFixed(1)}%`;
-    const savedTokensK = `${Math.max(0, (FULL_EXPOSURE_TOKENS - currentExposureTokens) / 1000).toFixed(1)}k`;
+    const savedTokensK = `${Math.max(0, (fullExposureTokens - currentExposureTokens) / 1000).toFixed(1)}k`;
 
     return {
-      fullExposureTokens: FULL_EXPOSURE_TOKENS,
+      fullExposureTokens,
       metaToolsTokens: META_TOOLS_TOKENS,
       currentExposureTokens,
       savedPercentage,
       savedTokensK,
       connectedServers: enabledServers,
       totalTools,
-      mountedSkills: this.skills.filter((s) => s.mounted).length,
-      totalSkills: this.skills.length,
-      quarantinedCount,
-      missingVaultKeys: this.vaultEntries.filter((v) => !v.configured).length,
+      mountedSkills: skills.filter((s) => s.mounted).length,
+      totalSkills: skills.length,
+      quarantinedCount: quarantines.length,
+      missingVaultKeys: vaultEntries.filter((v) => !v.configured).length,
     };
   }
 
@@ -1528,16 +1589,19 @@ export class GatewayStore {
   }
 
   public getKnowledgeAnalytics(): KnowledgeAnalytics {
-    const primaryDocChunks = this.docs.reduce((sum, d) => sum + d.chunkCount, 0);
-    const longFormChunks = this.docs.reduce(
+    const docs = this.docs.filter(doc => this.isOriginVisible(doc.origin));
+    const skills = this.skills.filter(skill => this.isOriginVisible(skill.origin));
+    const memories = this.memories.filter(memory => this.isOriginVisible(memory.origin));
+    const primaryDocChunks = docs.reduce((sum, d) => sum + d.chunkCount, 0);
+    const longFormChunks = docs.reduce(
       (sum, d) => sum + d.chunks.filter((c) => c.tokens >= 140 || d.sourceType === 'workspace').length,
       0
     );
-    const skillIndexVectors = this.skills.reduce(
+    const skillIndexVectors = skills.reduce(
       (sum, s) => sum + Math.max(2, s.files.filter((f) => f.injectToModel).length),
       0
     );
-    const memoryVectors = this.memories.length * 3;
+    const memoryVectors = memories.length * 3;
 
     const rawBuckets: Array<Omit<VectorDimensionBucket, 'sharePct'>> = [
       {
@@ -1545,32 +1609,32 @@ export class GatewayStore {
         dimValue: 1536,
         model: 'text-embedding-3-small',
         spaceLabel: 'RAG 主索引切片',
-        docs: this.docs.length,
-        chunks: primaryDocChunks + 36,
+        docs: docs.length,
+        chunks: primaryDocChunks,
       },
       {
         dimension: '1024 维',
         dimValue: 1024,
         model: 'bge-m3 (多语语义)',
         spaceLabel: 'Skill 智能路由索引',
-        docs: this.skills.length,
-        chunks: skillIndexVectors + 14,
+        docs: skills.length,
+        chunks: skillIndexVectors,
       },
       {
         dimension: '768 维',
         dimValue: 768,
         model: 'bge-base-zh-v1.5',
         spaceLabel: '跨宿主共享 Memory',
-        docs: this.memories.length,
-        chunks: memoryVectors + 12,
+        docs: memories.length,
+        chunks: memoryVectors,
       },
       {
         dimension: '3072 维',
         dimValue: 3072,
         model: 'text-embedding-3-large',
         spaceLabel: '架构长文高精度段',
-        docs: Math.max(1, this.docs.filter((d) => d.sourceType === 'workspace' || d.chunkCount >= 2).length),
-        chunks: longFormChunks + 10,
+        docs: docs.filter((d) => d.sourceType === 'workspace' || d.chunkCount >= 2).length,
+        chunks: longFormChunks,
       },
     ];
 
@@ -1580,16 +1644,18 @@ export class GatewayStore {
       sharePct: totalVectors > 0 ? Number(((b.chunks / totalVectors) * 100).toFixed(1)) : 0,
     }));
 
-    const latestCache = this.cacheHitSeries[this.cacheHitSeries.length - 1];
-    const prevCache = this.cacheHitSeries[this.cacheHitSeries.length - 2] || latestCache;
-    const cacheHitDelta = Number((latestCache.hitRate - prevCache.hitRate).toFixed(1));
-    const totalPeriodUpdates = this.docUpdateSeries.reduce((sum, p) => sum + p.created + p.updated, 0);
+    const cacheSeries = this.visibility.showDemo ? this.cacheHitSeries : [];
+    const updateSeries = this.visibility.showDemo ? this.docUpdateSeries : [];
+    const latestCache = cacheSeries[cacheSeries.length - 1];
+    const prevCache = cacheSeries[cacheSeries.length - 2] || latestCache;
+    const cacheHitDelta = latestCache && prevCache ? Number((latestCache.hitRate - prevCache.hitRate).toFixed(1)) : 0;
+    const totalPeriodUpdates = updateSeries.reduce((sum, p) => sum + p.created + p.updated, 0);
 
     return {
-      updateFrequency: this.docUpdateSeries.map((p) => ({ ...p })),
+      updateFrequency: updateSeries.map((p) => ({ ...p })),
       dimensionDistribution,
-      cacheHitTrend: this.cacheHitSeries.map((p) => ({ ...p })),
-      currentCacheHitRate: latestCache.hitRate,
+      cacheHitTrend: cacheSeries.map((p) => ({ ...p })),
+      currentCacheHitRate: latestCache?.hitRate || 0,
       cacheHitDelta,
       totalPeriodUpdates,
       totalVectors,
@@ -1597,25 +1663,38 @@ export class GatewayStore {
   }
 
   public getSnapshot(): GatewayStateSnapshot {
+    const hosts = this.hosts.filter(host => this.isOriginVisible(host.origin));
+    const servers = this.servers.filter(server => this.isOriginVisible(server.origin) && (server.origin !== 'fixture' || this.visibility.showFixtures)).map(server => ({
+      ...server,
+      tools: server.tools.map(tool => ({ ...tool, origin: tool.origin || server.origin })),
+    }));
+    const skills = this.skills.filter(skill => this.isOriginVisible(skill.origin));
+    const quarantines = this.quarantines.filter(record => this.isOriginVisible(record.origin));
+    const docs = this.docs.filter(doc => this.isOriginVisible(doc.origin));
+    const memories = this.memories.filter(memory => this.isOriginVisible(memory.origin));
+    const auditLogs = this.auditLogs.filter(event => this.isOriginVisible(event.origin));
+    const vault = this.getVaultEntriesWithRefs().filter(entry => this.isOriginVisible(entry.origin));
+    const metrics = this.getMetrics(servers, skills, quarantines, vault);
     return {
-      metrics: this.getMetrics(),
-      hosts: this.hosts,
+      visibility: this.getVisibility(),
+      metrics,
+      hosts,
       middleware: this.middleware,
-      servers: this.servers,
-      quarantines: this.quarantines,
-      skills: this.skills,
-      docs: this.docs,
-      memories: this.memories,
+      servers,
+      quarantines,
+      skills,
+      docs,
+      memories,
       vectorHealth: {
         ...this.vectorHealth,
-        totalChunks: this.docs.reduce((sum, d) => sum + d.chunkCount, 0),
+        totalChunks: docs.reduce((sum, d) => sum + d.chunkCount, 0),
       },
       knowledgeAnalytics: this.getKnowledgeAnalytics(),
-      vault: this.getVaultEntriesWithRefs(),
+      vault,
       sync: this.sync,
       preflight: this.getPreflight(),
       pendingApprovals: this.pendingApprovals.filter((a) => a.status === 'pending'),
-      auditLogs: this.auditLogs.slice(0, 40),
+      auditLogs: auditLogs.slice(0, 40),
     };
   }
 
@@ -1653,6 +1732,7 @@ export class GatewayStore {
         ? `// ${cleanName} MCP 远程配置\n{\n  "mcpServers": {\n    "agent-toolbox": {\n      "url": "http://127.0.0.1:3000/api/mcp/sse",\n      "headers": { "X-Toolbox-Host": "${cleanName}" }\n    }\n  }\n}`
         : `// ${cleanName} MCP 本地配置\n{\n  "mcpServers": {\n    "agent-toolbox": {\n      "command": "npx",\n      "args": ["agent-toolbox", "serve", "--stdio", "--host", "${id}"]\n    }\n  }\n}`;
     const host: HostProfile = {
+      origin: 'real',
       id,
       name: cleanName,
       latencyMs: Math.floor(8 + Math.random() * 10),
@@ -1707,6 +1787,7 @@ export class GatewayStore {
     }
     if (!this.vaultEntries.some((v) => v.key === cleanKey)) {
       this.vaultEntries.push({
+        origin: 'real',
         key: cleanKey,
         serviceName,
         maskedValue: '',
@@ -2098,6 +2179,7 @@ export class GatewayStore {
     this.quarantines = this.quarantines.filter((q) => q.serverId !== serverId);
     if (action === 'trust') {
       const audit: AuditRpcEvent = {
+        origin: this.servers.find(server => server.id === serverId)?.origin || 'real',
         id: crypto.randomUUID(), timestamp: nowTimeStr(), host: 'Local Operator',
         method: `quarantine.resolve:${serverId}`, outcome: 'trusted', latencyMs: 0,
         requestPayload: { serverId, action }, responsePayload: { serverId, outcome: 'trusted' },
@@ -2110,6 +2192,7 @@ export class GatewayStore {
   }
 
   public simulateQuarantine(serverId = 'scraper'): McpServer | null {
+    this.assertDemoEnabled();
     const server = this.servers.find((s) => s.id === serverId) || this.servers[0];
     if (!server) return null;
     server.state = 'quarantined';
@@ -2357,6 +2440,7 @@ export class GatewayStore {
     const fingerprint = computeSkillBundleFingerprint(id, resolvedVersion, files, attachedTools);
 
     const newSkill: DualLayerSkill = {
+      origin: 'real',
       id,
       version: resolvedVersion,
       summary: resolvedSummary,
@@ -2498,6 +2582,7 @@ export class GatewayStore {
     const id = existing ? existing.id : `doc-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
     const chunks = chunkMarkdownDocument(id, content);
     const doc: KnowledgeDoc = {
+      origin: sourceType === 'builtin' ? 'demo' : 'real',
       id,
       filePath: cleanPath,
       chunkCount: chunks.length,
@@ -2575,6 +2660,7 @@ export class GatewayStore {
     scope: 'global' | 'project' = 'global'
   ): SharedMemory {
     const mem: SharedMemory = {
+      origin: 'real',
       id: `mem-${Date.now()}`,
       host: host.trim() || 'Claude Code',
       topic: topic.trim() || '工程经验',
@@ -2665,6 +2751,7 @@ export class GatewayStore {
     }
 
     const created: VaultEntry = {
+      origin: 'real',
       key: cleanKey,
       serviceName: (serviceName || '未绑定').trim(),
       maskedValue: masked,
@@ -2750,6 +2837,7 @@ export class GatewayStore {
     item.status = decision === 'approve' ? 'approved' : 'rejected';
 
     const event: AuditRpcEvent = {
+      origin: this.servers.find(server => server.tools.some(tool => tool.name === item.toolName))?.origin || 'real',
       id: `rpc-${Date.now()}`,
       timestamp: nowTimeStr(),
       host: item.host,
@@ -2812,6 +2900,7 @@ export class GatewayStore {
     server.tools = liveTools.map(tool => {
       const existing = server.tools.find(item => item.name === tool.name);
       return {
+        origin: server.origin || 'real',
         name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
         serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
         readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
@@ -2830,6 +2919,7 @@ export class GatewayStore {
         const baselineSchema = baseline?.inputSchema ? JSON.stringify(baseline.inputSchema, null, 2) : '';
         const liveSchema = JSON.stringify(tool.inputSchema ?? {}, null, 2);
         const record: QuarantineRecord = {
+          origin: server.origin || 'real',
           serverId: server.id,
           toolName: tool.name,
           expectedHash: `sha256:${expected}`,
@@ -2856,6 +2946,7 @@ export class GatewayStore {
 
   public async validateMcpTool(name: string) {
     const server = this.servers.find(item => item.tools.some(tool => tool.name === name));
+    if (server && (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures))) throw new RpcError(-32602, 'Tool is hidden by data visibility settings');
     if (!server || server.protocol !== 'stdio' || server.connectOnStart === false) return;
     try {
       const liveTools = await this.downstream.list(server);
@@ -2871,6 +2962,7 @@ export class GatewayStore {
   public async callDownstream(name: string, args: Record<string, unknown>) {
     const server = this.servers.find(s => s.tools.some(t => t.name === name));
     if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
+    if (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures)) throw new RpcError(-32602, 'Tool is hidden by data visibility settings');
     if (server.state === 'quarantined') this.throwQuarantineError(server, name);
     return this.downstream.call(server, name, args);
   }
@@ -2891,9 +2983,10 @@ export class GatewayStore {
     const meta = metaTools.find(t => t.name === name);
     if (meta) return meta;
     const server = this.servers.find(s => s.tools.some(t => t.name === name));
+    if (server && (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures))) throw new RpcError(-32602, 'Unknown tool');
     const tool = server?.tools.find(t => t.name === name);
     if (!server || !tool) {
-      const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools).find(t => t.name === name);
+      const attached = this.skills.filter(s => s.origin !== 'demo' && s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools).find(t => t.name === name);
       if (attached) return { ...attached, inputSchema: attached.inputSchema || { type: 'object', properties: {} } };
       throw new RpcError(-32602, 'Unknown tool');
     }
@@ -2909,10 +3002,10 @@ export class GatewayStore {
 
   public getMcpTools(hostName: string) {
     const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
-    const visible = this.servers.filter(s => s.enabled)
+    const visible = this.servers.filter(s => s.enabled && s.origin !== 'demo' && (s.origin !== 'fixture' || this.visibility.showFixtures))
       .flatMap(s => s.tools.filter(t => t.mode === 'pinned' && (!host || host.scope === 'full' || t.readOnly)).map(t =>
         s.state === 'quarantined' ? { ...t, description: `[QUARANTINED] ${t.description}` } : t));
-    const attached = this.skills.filter(s => s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools);
+    const attached = this.skills.filter(s => s.origin !== 'demo' && s.mounted && s.mountedBy === hostName).flatMap(s => s.attachedTools);
     return [...metaTools, ...visible, ...attached].map(t => ({
       name: t.name, description: t.description,
       inputSchema: ('inputSchema' in t && t.inputSchema) || { type: 'object', properties: {} },
@@ -2920,7 +3013,9 @@ export class GatewayStore {
   }
 
   public recordMcpCall(host: string, requestPayload: Record<string, unknown>, responsePayload: Record<string, unknown>, started: number) {
+    const toolName = String((requestPayload.params as Record<string, unknown> | undefined)?.name || '');
     const event: AuditRpcEvent = {
+      origin: toolName.startsWith('toolbox__') ? 'real' : this.servers.find(server => server.tools.some(tool => tool.name === toolName))?.origin || 'real',
       id: crypto.randomUUID(), timestamp: nowTimeStr(), host,
       method: String((requestPayload.params as Record<string, unknown>)?.name || requestPayload.method),
       outcome: responsePayload.error ? 'blocked' : 'ok', latencyMs: Date.now() - started,
@@ -2939,6 +3034,7 @@ export class GatewayStore {
     method?: string;
     argumentsObj?: Record<string, unknown>;
   }): AuditRpcEvent {
+    this.assertDemoEnabled();
     const host =
       this.hosts.find((h) => h.name === params.hostName || h.id === params.hostName) || this.hosts[1];
     const stepIndex = typeof params.stepIndex === 'number' ? params.stepIndex : undefined;
@@ -3348,6 +3444,7 @@ export class GatewayStore {
     }
 
     const event: AuditRpcEvent = {
+      origin: 'demo',
       id: `rpc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
       timestamp: nowTimeStr(),
       host: host.name,
@@ -3706,7 +3803,7 @@ export class GatewayStore {
     ];
 
     const pinnedTools = this.servers
-      .filter((s) => s.enabled && s.state !== 'quarantined')
+      .filter((s) => s.enabled && s.state !== 'quarantined' && s.origin !== 'demo' && (s.origin !== 'fixture' || this.visibility.showFixtures))
       .flatMap((s) => s.tools.filter((t) => t.mode === 'pinned'))
       .filter((t) => {
         if (host.scope === 'min') {
@@ -3722,7 +3819,7 @@ export class GatewayStore {
       }));
 
     const mountedSkillTools = this.skills
-      .filter((s) => s.mounted)
+      .filter((s) => s.mounted && s.origin !== 'demo')
       .flatMap((s) =>
         s.attachedTools.map((at) => ({
           name: at.name,
@@ -3773,6 +3870,7 @@ export class GatewayStore {
       methodLabel = toolName
     ) => {
       const event: AuditRpcEvent = {
+        origin: this.servers.find(server => server.tools.some(tool => tool.name === toolName))?.origin || 'real',
         id: `rpc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
         timestamp: nowTimeStr(),
         host: host.name,

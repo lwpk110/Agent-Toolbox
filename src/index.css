@@ -63,6 +63,15 @@
 .nav { flex: 1 1 auto; min-width: 0; display: flex; align-items: stretch; gap: var(--s1); overflow-x: auto; overflow-y: hidden; scrollbar-width: none; margin-right: var(--s5); }
 .nav::-webkit-scrollbar { display: none; }
 .top > #syncBtn { flex: none; align-self: center; }
+.visibility-menu { flex: none; align-self: center; position: relative; margin-right: var(--s3); font-size: var(--fs-13); }
+.visibility-menu summary { cursor: pointer; list-style: none; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.visibility-menu summary::-webkit-details-marker { display: none; }
+.visibility-options { position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 180px; padding: 8px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 8px 24px #0002; }
+.visibility-options label { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 8px 0; white-space: nowrap; }
+.visibility-options input { accent-color: var(--accent); width: 16px; height: 16px; }
+.origin-tag { display: inline-flex; align-items: center; border-radius: 4px; padding: 1px 5px; font-size: var(--fs-11); line-height: 16px; white-space: nowrap; }
+.origin-tag.demo { color: #8a4b00; background: #fff0d6; }
+.origin-tag.fixture { color: #075985; background: #dff3fb; }
 .nav button { flex: none; display: flex; align-items: center; gap: 6px; padding: 0 var(--s3); border: 0; background: transparent; color: var(--ink); font-size: var(--fs-14); cursor: pointer; white-space: nowrap; box-shadow: inset 0 -2px 0 transparent; }
 .nav button .od-icon { --od-icon-size: 16px; color: var(--ink-2); }
 .nav button[aria-current="page"] { font-weight: 600; box-shadow: inset 0 -2px 0 var(--tab-mark); }
