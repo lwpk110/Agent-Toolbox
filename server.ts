@@ -475,8 +475,8 @@ app.post('/api/v1/servers/import-json', (req, res) => {
   });
 });
 
-app.post('/api/v1/servers', (req, res) => {
-  const { name, protocol, commandOrUrl, cwd, args, env, headers, defaultMode, secretRef, initialToolName, initialToolDesc } =
+app.post('/api/v1/servers', async (req, res) => {
+  const { name, protocol, commandOrUrl, cwd, args, env, headers, defaultMode, secretRef, connectOnStart, initialToolName, initialToolDesc } =
     req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     sendErr(res, 400, 'INVALID_NAME', '请填写 MCP Server 命名空间名称。');
@@ -501,12 +501,16 @@ app.post('/api/v1/servers', (req, res) => {
     headers: headers && typeof headers === 'object' && !Array.isArray(headers) ? headers : undefined,
     defaultMode: mode,
     secretRef: typeof secretRef === 'string' ? secretRef : undefined,
+    connectOnStart: typeof connectOnStart === 'boolean' ? connectOnStart : undefined,
     initialToolName: typeof initialToolName === 'string' ? initialToolName : undefined,
     initialToolDesc: typeof initialToolDesc === 'string' ? initialToolDesc : undefined,
   });
   if (result.error) {
     sendErr(res, 400, 'SERVER_CREATE_FAILED', result.error);
     return;
+  }
+  if (result.server?.protocol === 'stdio' && result.server.connectOnStart !== false) {
+    await gatewayStore.refreshMcpTools(result.server.id);
   }
   sendOk(res, gatewayStore.getSnapshot());
 });

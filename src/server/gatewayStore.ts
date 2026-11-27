@@ -503,7 +503,9 @@ export class GatewayStore {
     this.emitEvent('server.disconnected', { serverId: server.id });
   }, server => {
     void this.refreshMcpTools(server.id).catch(error => console.error(`[mcp] ${server.id} list_changed: ${String(error)}`));
-  });
+  }, server => this.resolveServerSecrets(server).ok
+    ? { ...server, env: this.resolveServerSecrets(server).env, headers: this.resolveServerSecrets(server).headers }
+    : (() => { throw new RpcError(-32004, `Required vault secret missing for ${server.id}`); })());
 
   private hosts: HostProfile[] = [
     {
@@ -1832,6 +1834,7 @@ export class GatewayStore {
     env?: Record<string, string>;
     headers?: Record<string, string>;
     defaultMode: ExposureMode;
+    connectOnStart?: boolean;
     secretRef?: string;
     initialToolName?: string;
     initialToolDesc?: string;
@@ -1912,6 +1915,7 @@ export class GatewayStore {
       env: Object.keys(safeEnv).length ? safeEnv : undefined,
       headers: Object.keys(safeHeaders).length ? safeHeaders : undefined,
       enabled: true,
+      connectOnStart: input.connectOnStart ?? true,
       latencyMs: Math.floor(10 + Math.random() * 22),
       state: 'ok',
       fingerprint: fp,
@@ -2923,10 +2927,11 @@ export class GatewayStore {
     const mismatches = liveTools.filter(tool => corruptLock || !locked?.tools[tool.name] || locked.tools[tool.name] !== toolFingerprint(tool));
     const previousTools = server.tools;
     server.tools = liveTools.map(tool => {
-      const existing = server.tools.find(item => item.name === tool.name);
+      const name = tool.name.includes('__') ? tool.name : `${server.id.replace(/-/g, '_')}__${tool.name}`;
+      const existing = server.tools.find(item => item.name === name);
       return {
         origin: server.origin || 'real',
-        name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
+        name, remoteName: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
         serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
         readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
         estimatedTokens: existing?.estimatedTokens || 100,
@@ -2989,7 +2994,7 @@ export class GatewayStore {
     if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
     if (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures)) throw new RpcError(-32602, 'Tool is hidden by data visibility settings');
     if (server.state === 'quarantined') this.throwQuarantineError(server, name);
-    return this.downstream.call(server, name, args);
+    return this.downstream.call(server, server.tools.find(tool => tool.name === name)?.remoteName || name, args);
   }
 
   private throwQuarantineError(server: McpServer, toolName: string): never {
@@ -3627,6 +3632,7 @@ export class GatewayStore {
 
       const existingMap = new Map(server.tools.map((t) => [t.name, t]));
       const detectedDrifts: QuarantineRecord[] = [];
+      const inheritedMode = server.tools.some((t) => t.mode === 'pinned') ? 'pinned' : (server.tools[0]?.mode || 'lazy');
 
       const nextTools = discovered.tools.map((dt) => {
         const fullName = `${prefix}${dt.remoteName}`;
@@ -3637,7 +3643,7 @@ export class GatewayStore {
           inputSchema: dt.inputSchema,
         });
         const lockedFp = prev?.lockedFingerprint || fp;
-        const drifted = Boolean(prev && prev.lockedFingerprint && prev.lockedFingerprint !== fp);
+        const drifted = Boolean(prev && prev.lockedFingerprint && prev.lockedFingerprint.length === fp.length && prev.lockedFingerprint !== fp);
         if (drifted) {
           detectedDrifts.push({
             serverId: server.id,
@@ -3657,7 +3663,7 @@ export class GatewayStore {
           remoteName: dt.remoteName,
           description: dt.description,
           estimatedTokens: Math.max(80, Math.round(rawSchemaChars / 3.5)),
-          mode: prev?.mode || 'lazy',
+          mode: prev?.mode || inheritedMode,
           hitl: prev?.hitl ?? Boolean(dt.annotations?.destructiveHint),
           fingerprint: fp,
           lockedFingerprint: lockedFp,

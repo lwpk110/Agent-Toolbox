@@ -39,6 +39,37 @@ test('hides demo entities from the default snapshot while retaining fixture and 
   expect(store.getSnapshot().servers.find((server) => server.id === 'github')?.origin).toBe('demo');
 });
 
+test('keeps the registered real GitHub MCP server visible while hiding the demo GitHub namespace', async () => {
+  const store = makeStore(false, false);
+  const created = store.addServer({
+    name: 'github-mcp',
+    protocol: 'stdio',
+    commandOrUrl: '/home/box/.local/bin/github-mcp-server',
+    args: ['stdio'],
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: 'vault://GITHUB_MCP_PAT' },
+    secretRef: 'vault://GITHUB_MCP_PAT',
+    defaultMode: 'pinned',
+  });
+
+  expect(created.server?.id).toBe('github-mcp');
+  expect(created.server?.origin).toBe('real');
+  expect(created.server?.connectOnStart).toBe(true);
+  expect(created.server?.enabled).toBe(true);
+  expect(created.server?.secretRef).toBe('vault://GITHUB_MCP_PAT');
+  expect(created.server?.env).toEqual({ GITHUB_PERSONAL_ACCESS_TOKEN: 'vault://GITHUB_MCP_PAT' });
+  expect(store.getSnapshot().servers.map(server => server.id)).toContain('github-mcp');
+  expect(store.getSnapshot().servers.map(server => server.id)).not.toContain('github');
+  const handler = createMcpHandler(store);
+  const names = (await handler({ jsonrpc: '2.0', id: 'list', method: 'tools/list' })).result.tools.map((tool: { name: string }) => tool.name);
+  expect(names.some((name: string) => name.startsWith('github__'))).toBe(false);
+  expect(names).not.toContain('github__search_code');
+
+  store.setVisibility({ showDemo: true, showFixtures: true });
+  const visible = store.getSnapshot();
+  expect(visible.servers.find(server => server.id === 'github-mcp')?.origin).toBe('real');
+  expect(visible.servers.find(server => server.id === 'github')?.origin).toBe('demo');
+});
+
 test('preflight and sync manifest include only entities visible under the current settings', () => {
   const store = makeStore(false, false);
   const preflight = store.getPreflight();
