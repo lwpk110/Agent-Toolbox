@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from 'bun:test';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,7 +10,7 @@ const dirs: string[] = [];
 function setup() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-handler-'));
   dirs.push(dir);
-  const store = new GatewayStore({ dataFile: path.join(dir, 'state.json') });
+  const store = new GatewayStore({ dataFile: path.join(dir, 'state.json'), lockFile: path.join(dir, 'lock.json') });
   // These handler tests exercise the built-in skill and stdio seed migrations.
   store.setVisibility({ showDemo: true });
   store.updateServer('fixture', { enabled: false });
@@ -76,7 +77,53 @@ test('rejects invalid requests and params with original id, and keeps skill tool
   expect(own.some(t => t.name === 'skill_owasp__scan_deps')).toBe(true);
   expect(other.some(t => t.name === 'skill_owasp__scan_deps')).toBe(false);
   const unavailable = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'skill_owasp__scan_deps', arguments: {} } }, { hostName: 'Host A' });
-  expect(unavailable.error.code).toBe(-32006);
+  expect(unavailable.error.code).toBe(-32602);
+});
+
+test('imports, executes, audits and restores a workspace skill through MCP tools/call', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-skill-'));
+  dirs.push(dir);
+  const dataFile = path.join(dir, 'state.json');
+  const lockFile = path.join(dir, 'lock.json');
+  const store = new GatewayStore({ dataFile, lockFile });
+  store.setVisibility({ showDemo: false });
+  const skillDir = path.resolve('skills/runtime-probe');
+  const skillMd = fs.readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8');
+  const script = fs.readFileSync(path.join(skillDir, 'scripts/probe.ts'), 'utf8');
+  const imported = store.createSkill({
+    id: 'runtime-probe', skillMarkdown: skillMd, sourceType: 'workspace', sourcePath: 'skills/runtime-probe',
+    files: [{ path: 'SKILL.md', content: skillMd }, { path: 'scripts/probe.ts', content: script }],
+  });
+  expect(imported.skill?.origin).toBe('real');
+  expect(imported.skill?.attachedTools.map(tool => tool.name)).toContain('skill_runtime_probe__probe');
+  const handle = createMcpHandler(store);
+  const name = 'skill_runtime_probe__probe';
+  const request = (id: string, token: string) => handle({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { token } } }, { hostName: 'Codex CLI' });
+  expect((await handle({ jsonrpc: '2.0', id: 'list-before', method: 'tools/list' }, { hostName: 'Codex CLI' })).result.tools.some((tool: any) => tool.name === name)).toBe(false);
+  expect((await request('unmounted', 'not-a-secret-token')).error.code).toBe(-32602);
+  store.mountSkill('runtime-probe', 'Other Host');
+  expect((await handle({ jsonrpc: '2.0', id: 'other-host-list', method: 'tools/list' }, { hostName: 'Codex CLI' })).result.tools.some((tool: any) => tool.name === name)).toBe(false);
+  expect((await request('wrong-host', 'not-a-secret-token')).error.code).toBe(-32602);
+  store.mountSkill('runtime-probe', 'Codex CLI');
+  const list = await handle({ jsonrpc: '2.0', id: 'list-after', method: 'tools/list' }, { hostName: 'Codex CLI' });
+  expect(list.result.tools.some((tool: any) => tool.name === name)).toBe(true);
+  expect(list.result.tools.some((tool: any) => tool.name.startsWith('skill_owasp__'))).toBe(false);
+  const token = `probe-${crypto.randomUUID()}`;
+  const called = await request('real-call', token);
+  const output = JSON.parse(called.result.content[0].text);
+  expect(output).toEqual({ ok: true, marker: 'AGENT_TOOLBOX_SKILL_PROBE_OK', token });
+  const event = store.getSnapshot().auditLogs.find(item => item.requestPayload.id === 'real-call');
+  expect(event?.host).toBe('Codex CLI');
+  expect(event?.origin).toBe('real');
+  expect(event?.outcome).toBe('ok');
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const restarted = new GatewayStore({ dataFile, lockFile });
+  restarted.setVisibility({ showDemo: false });
+  expect(restarted.getSnapshot().skills.find(skill => skill.id === 'runtime-probe')?.mounted).toBe(true);
+  const restartedCall = await createMcpHandler(restarted)({
+    jsonrpc: '2.0', id: 'after-restart', method: 'tools/call', params: { name, arguments: { token: `${token}-restart` } },
+  }, { hostName: 'Codex CLI' });
+  expect(JSON.parse(restartedCall.result.content[0].text).token).toBe(`${token}-restart`);
 });
 
 test('preserves existing configuration during stdio seed migration and respects fixture deletion across restarts', async () => {
