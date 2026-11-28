@@ -8,6 +8,26 @@ import path from 'node:path';
 
 import { RpcError, rpcError } from './rpcError';
 export { rpcError } from './rpcError';
+
+const META_TOOL_NAMES = [
+  'toolbox__discover_capabilities',
+  'toolbox__inspect_schema',
+  'toolbox__call_tool',
+  'toolbox__load_skill',
+  'toolbox__unload_skill',
+  'toolbox__read_skill_file',
+  'toolbox__search_knowledge',
+  'toolbox__remember',
+] as const;
+
+function canonicalizeMcpName(name: string): string {
+  return META_TOOL_NAMES.find(item => item.toLowerCase() === name.toLowerCase()) ?? name;
+}
+
+function isReservedToolboxName(name: string): boolean {
+  return /^toolbox__/i.test(name);
+}
+
 export function isObject(value: unknown): value is Record<string, any> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -120,21 +140,21 @@ export function createMcpHandler(store: GatewayStore) {
         case 'tools/list': await store.refreshMcpTools(); result = { tools: store.getMcpTools(hostName) }; break;
         case 'tools/call': {
           if (typeof params.name !== 'string' || (params.arguments !== undefined && !isObject(params.arguments))) throw new RpcError(-32602, 'Invalid tools/call params');
-          let name = params.name;
+          let name = canonicalizeMcpName(params.name);
           let args = params.arguments || {};
           if (name === 'toolbox__call_tool') {
-            const innerName = String(args.toolName || args.name || '').trim();
+            const innerName = canonicalizeMcpName(String(args.toolName || args.name || '').trim());
             const innerArgs = isObject(args.arguments) ? args.arguments : {};
             if (!innerName || innerName === 'toolbox__call_tool') throw new RpcError(-32602, 'Valid target toolName is required for toolbox__call_tool.');
             name = innerName;
             args = innerArgs;
           }
-          const matchingSkill = store.getSnapshot().skills.find(skill => skill.attachedTools.some(tool => tool.name === name));
-          if (!name.startsWith('toolbox__') && !matchingSkill) await store.validateMcpTool(name);
+          const matchingSkill = store.getSnapshot().skills.find(skill => skill.origin !== 'demo' && skill.mounted && skill.mountedBy === hostName && skill.attachedTools.some(tool => tool.name === name));
+          if (!isReservedToolboxName(name) && !matchingSkill) await store.validateMcpTool(name);
           const definition = store.getMcpTool(name, hostName);
           const schema = definition.inputSchema as any;
           validateArguments(args, schema);
-          if (!name.startsWith('toolbox__') && store.requiresHitlApproval(definition)) {
+          if (!isReservedToolboxName(name) && store.requiresHitlApproval(definition)) {
             const approval = store.createHitlHold({ toolName: name, args, host: hostName, sessionId: context.sessionId });
             const decision = await store.awaitHitlDecision(approval);
             if (decision !== 'approve') {
@@ -144,7 +164,7 @@ export function createMcpHandler(store: GatewayStore) {
             }
           }
           const skillTool = Boolean(matchingSkill);
-          const actual: any = name.startsWith('toolbox__') ? executeMeta(store, name, args, hostName) : skillTool
+          const actual: any = isReservedToolboxName(name) ? executeMeta(store, name, args, hostName) : skillTool
             ? await executeSkillTool(store, name, args, hostName)
             : await store.callDownstream(name, args);
           result = { content: [{ type: 'text', text: store.redactSensitiveText(typeof actual === 'string' ? actual : JSON.stringify(actual)) }], ...(actual?.isError ? { isError: true } : {}) };

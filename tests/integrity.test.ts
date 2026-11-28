@@ -41,7 +41,7 @@ test('real stdio fixture is locked on first trust and poison reconnect is quaran
     });
   });
   const result = JSON.parse(fs.readFileSync(output, 'utf8'));
-  expect(/^[a-f0-9]{64}$/.test(result.lock.servers.fixture.tools['fixture__echo'])).toBe(true);
+  expect(/^[a-f0-9]{64}$/.test(result.lock.servers.fixture.tools['echo'])).toBe(true);
   expect(result.cleanCall.error === undefined).toBe(true);
   expect(result.poisonCall.error.code).toBe(-32001);
   expect(result.poisonCall.error.message).toBe('Tool quarantined: schema hash mismatch');
@@ -63,7 +63,7 @@ test('real stdio fixture is locked on first trust and poison reconnect is quaran
   expect(result.trustRecovered).toBe(true);
   expect(result.trustedCall.error === undefined).toBe(true);
   expect(result.trustAudit.outcome).toBe('trusted');
-  expect(result.trustedLock.servers.fixture.tools['fixture__echo']).toBe(result.quarantine.actualHash.replace('sha256:', ''));
+  expect(result.trustedLock.servers.fixture.tools['echo']).toBe(result.quarantine.actualHash.replace('sha256:', ''));
   expect(result.corruptLockState).toBe('quarantined');
   expect(result.corruptLockOriginal).toBe('{broken lock');
   expect(result.corruptCall.error.code).toBe(-32001);
