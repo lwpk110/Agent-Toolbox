@@ -1001,7 +1001,17 @@ app.post('/api/v1/sandbox/rpc', (req, res) => {
 /* ---------- Unified MCP JSON-RPC 2.0 Entrypoint (/api/mcp & /api/mcp/*) ---------- */
 function normalizeMcpHostName(name: string): string {
   const normalized = name.trim();
-  return normalized.toLowerCase().includes('codex') ? 'Codex CLI' : normalized;
+  const key = normalized.toLowerCase().replace(/[\s_]+/g, '-');
+  const canonicalNames: Record<string, string> = {
+    codex: 'Codex CLI',
+    'codex-cli': 'Codex CLI',
+    claude: 'Claude Code',
+    'claude-code': 'Claude Code',
+    antigravity: 'Antigravity',
+    opencode: 'OpenCode',
+  };
+  if (canonicalNames[key]) return canonicalNames[key];
+  return key.includes('codex') ? 'Codex CLI' : normalized;
 }
 
 function resolveMcpRequestHost(req: express.Request, sessionHost?: string): string {
