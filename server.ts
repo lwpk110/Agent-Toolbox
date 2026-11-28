@@ -24,7 +24,6 @@ import {
   normalizeSkillFilePath,
   parseSkillFrontmatter,
 } from './src/server/gatewayStore';
-import { dispatchMcpJsonRpc } from './src/server/mcpProtocol';
 import { downstreamPool } from './src/server/downstreamPool';
 import { removeDaemonLockIfOwner, writeDaemonLock } from './src/server/daemonLock';
 import {
@@ -49,7 +48,7 @@ const DIST_DIR = path.resolve(ROOT_DIR, 'dist');
 
 app.use(express.json({ limit: '4mb', strict: false }));
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if (req.path === '/api/mcp/messages' && error instanceof SyntaxError) {
+  if ((req.path === '/api/mcp/messages' || req.path === '/api/mcp') && error instanceof SyntaxError) {
     res.json(rpcError(null, -32700, 'Parse error'));
     return;
   }
@@ -1000,14 +999,22 @@ app.post('/api/v1/sandbox/rpc', (req, res) => {
 });
 
 /* ---------- Unified MCP JSON-RPC 2.0 Entrypoint (/api/mcp & /api/mcp/*) ---------- */
-function resolveMcpHostHeader(req: express.Request): string {
+function normalizeMcpHostName(name: string): string {
+  const normalized = name.trim();
+  return normalized.toLowerCase().includes('codex') ? 'Codex CLI' : normalized;
+}
+
+function resolveMcpRequestHost(req: express.Request, sessionHost?: string): string {
   const qHost = typeof req.query?.host === 'string' ? req.query.host.trim() : '';
   const hHost = typeof req.headers['x-toolbox-host'] === 'string' ? req.headers['x-toolbox-host'].trim() : '';
-  return qHost || hHost || 'codex';
+  const messages = Array.isArray(req.body) ? req.body : [req.body];
+  const clientName = messages.find(msg => msg?.method === 'initialize')?.params?.clientInfo?.name;
+  const requested = qHost || hHost || (typeof clientName === 'string' ? clientName : '') || sessionHost || 'Codex CLI';
+  return normalizeMcpHostName(requested);
 }
 
 function attachMcpNotificationStream(req: express.Request, res: express.Response, sendEndpointEvent: boolean) {
-  const hostName = resolveMcpHostHeader(req);
+  const hostName = resolveMcpRequestHost(req);
   gatewayStore.recordHostHeartbeat(hostName, { sessionDelta: 1 });
 
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
@@ -1037,25 +1044,34 @@ function attachMcpNotificationStream(req: express.Request, res: express.Response
   });
 }
 
+const mcpClients = new Map<string, string>();
+
+function rememberMcpSession(body: unknown, response: unknown, sessionId: string, hostName: string): boolean {
+  const messages = Array.isArray(body) ? body : [body];
+  const initialized = response && (Array.isArray(response)
+    ? response.some(item => item.result?.serverInfo)
+    : (response as any).result?.serverInfo);
+  if (!messages.some(msg => msg?.method === 'initialize') || !initialized) return false;
+  if (mcpClients.size >= 256) mcpClients.delete(mcpClients.keys().next().value!);
+  mcpClients.set(sessionId, hostName);
+  return true;
+}
+
 app.get('/api/mcp', (req, res) => {
   attachMcpNotificationStream(req, res, false);
 });
 
 app.post('/api/mcp', async (req, res) => {
-  const hostName = resolveMcpHostHeader(req);
   const incomingSession = req.headers['mcp-session-id'];
-  const sessionId =
-    typeof incomingSession === 'string' && incomingSession.trim()
-      ? incomingSession.trim()
-      : `tbx_${hostName}_${Date.now().toString(36)}`;
+  const sessionId = typeof incomingSession === 'string' && incomingSession.trim()
+    ? incomingSession.trim()
+    : crypto.randomUUID();
+  const hostName = resolveMcpRequestHost(req, mcpClients.get(sessionId));
+  const response = await handleMcpMessage(req.body, { hostName });
+  rememberMcpSession(req.body, response, sessionId, hostName);
   res.setHeader('Mcp-Session-Id', sessionId);
-
-  const outcome = await dispatchMcpJsonRpc(req.body, hostName);
-  if (outcome.isNotification) {
-    res.status(202).end();
-    return;
-  }
-  res.json(outcome.response);
+  if (response === null) res.status(202).end();
+  else res.json(response);
 });
 
 app.delete('/api/mcp', (_req, res) => {
@@ -1066,19 +1082,13 @@ app.get('/api/mcp/sse', (req, res) => {
   attachMcpNotificationStream(req, res, true);
 });
 
-const mcpClients = new Map<string, string>();
 app.post('/api/mcp/messages', async (req, res) => {
   const sessionId = req.get('mcp-session-id');
-  const headerHost = req.get('x-toolbox-host');
-  const initialize = (Array.isArray(req.body) ? req.body : [req.body]).find(msg => msg?.method === 'initialize');
-  const clientName = initialize?.params?.clientInfo?.name;
-  const hostName = headerHost || (typeof clientName === 'string' ? clientName : undefined) || (sessionId ? mcpClients.get(sessionId) : undefined);
+  const hostName = resolveMcpRequestHost(req, sessionId ? mcpClients.get(sessionId) : undefined);
   const response = await handleMcpMessage(req.body, { hostName });
-  if (initialize && response && (Array.isArray(response) ? response.some(r => r.result?.serverInfo) : response.result?.serverInfo)) {
-    const id = crypto.randomUUID();
-    if (mcpClients.size >= 256) mcpClients.delete(mcpClients.keys().next().value!);
-    mcpClients.set(id, hostName || 'Unknown Host');
-    res.setHeader('mcp-session-id', id);
+  const initializedSessionId = crypto.randomUUID();
+  if (rememberMcpSession(req.body, response, initializedSessionId, hostName)) {
+    res.setHeader('mcp-session-id', initializedSessionId);
   }
   if (response === null) res.status(202).end();
   else res.json(response);

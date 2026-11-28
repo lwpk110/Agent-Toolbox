@@ -9,4 +9,6 @@ export const metaTools = [
   tool('read_skill_file', '按需读取 Skill 文件', { skillId: string, filePath: string }, ['skillId', 'filePath']),
   tool('unload_skill', '卸载 Skill 并释放上下文', { skillId: string }, ['skillId']),
   tool('search_knowledge', '检索文档、共享记忆与能力推荐', { query: string, includeMemory: { type: 'boolean' }, includeRouting: { type: 'boolean' } }, ['query']),
+  tool('call_tool', '通过网关安全管线调用已发现的 Lazy 工具或已挂载 Skill 工具', { toolName: string, arguments: { type: 'object' } }, ['toolName']),
+  tool('remember', '把一条共享记忆写入网关', { topic: string, content: string, scope: { type: 'string' } }, ['content']),
 ];

@@ -40,6 +40,14 @@ export function executeMeta(store: GatewayStore, name: string, args: Record<stri
       if (!skill || !file) throw new RpcError(-32602, 'Invalid skill or filePath');
       return { skillId: skill.id, path: file.path, category: file.category, tier: 'L3', sha256: file.sha256, bundleFingerprint: skill.fingerprint, content: store.redactSensitiveText(file.content) };
     }
+    case 'toolbox__remember': {
+      const content = String(args.content || '').trim();
+      if (!content) throw new RpcError(-32602, 'content is required for toolbox__remember.');
+      const topic = String(args.topic || '工程经验').trim();
+      const scope = args.scope === 'project' ? 'project' : 'global';
+      const memory = store.addMemory(host, topic, content, scope);
+      return { status: 'saved', memory };
+    }
     default: throw new RpcError(-32602, 'Unknown tool');
   }
 }

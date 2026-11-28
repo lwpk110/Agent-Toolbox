@@ -242,7 +242,10 @@ rl.on('line', (line) => {
         arguments: { toolName: 'github__delete_repo', arguments: { repo: 'org/test' } },
       },
     });
-    assert.equal((blockedRes.result as Record<string, unknown>)?.isError, true);
+    const blockedError = (blockedRes as { error?: { code?: number } }).error;
+    const blockedResult = blockedRes.result as Record<string, unknown> | undefined;
+    assert.ok(blockedError || blockedResult?.isError, 'audit-scope or missing destructive tool must fail');
+    assert.ok(!blockedResult || blockedResult.isError, 'destructive tool must not return a successful result');
 
     // 5. Add real downstream echo MCP server, sync its tools, and invoke via toolbox__call_tool with redaction!
     const addRes = await fetch(`${daemon.baseUrl}/api/v1/servers`, {

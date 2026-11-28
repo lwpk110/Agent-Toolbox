@@ -66,12 +66,80 @@ async function gateway() {
     throw new Error(`Gateway startup timeout: ${logs}`);
   }
   const child = await start();
-  const rpc = async (body: unknown, host = 'Codex CLI') => {
-    const response = await fetch(`${url}/api/mcp/messages`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-toolbox-host': host }, body: JSON.stringify(body) });
+  const rpc = async (body: unknown, host = 'Codex CLI', route = '/api/mcp/messages') => {
+    const response = await fetch(`${url}${route}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-toolbox-host': host }, body: JSON.stringify(body) });
     return { status: response.status, text: await response.text(), headers: response.headers };
   };
   return { dir, child, start, url, rpc, logs: () => logs };
 }
+
+networkTest('/api/mcp quarantines a real downstream after its schema changes', async () => {
+  const g = await gateway();
+  await fetch(`${g.url}/api/v1/settings/visibility`, {
+    method: 'PUT', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ showFixtures: true }),
+  });
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'list', method: 'tools/list' }, 'Codex CLI', '/api/mcp')).text);
+  expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
+
+  await fetch(`${g.url}/api/v1/servers/fixture`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ env: { FIXTURE_POISON: '1' } }),
+  });
+  const call = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'rug-pull', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'must-not-forward' } },
+  }, 'Codex CLI', '/api/mcp')).text);
+  expect(call.error.code).toBe(-32001);
+  await stop(g.child);
+  await g.start();
+  const afterRestart = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'restart-rug-pull', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'must-stay-quarantined' } },
+  }, 'Codex CLI', '/api/mcp')).text);
+  expect(afterRestart.error.code).toBe(-32001);
+});
+
+networkTest('codex host aliases are recorded under the canonical Codex CLI name', async () => {
+  const g = await gateway();
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'list', method: 'tools/list' }, 'Codex CLI', '/api/mcp?host=codex')).text);
+  expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
+  const call = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'alias-call', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'canonical-host' } },
+  }, 'Codex CLI', '/api/mcp?host=codex')).text);
+  expect(JSON.parse(call.result.content[0].text).content[0].text).toBe('canonical-host');
+  const messageAlias = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'message-alias-call', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'canonical-message-host' } },
+  }, 'codex')).text);
+  expect(JSON.parse(messageAlias.result.content[0].text).content[0].text).toBe('canonical-message-host');
+  const imported = await fetch(`${g.url}/api/v1/skills/import-directory`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ relativeDir: 'runtime-probe' }),
+  });
+  expect(imported.ok).toBe(true);
+  const mount = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'alias-mount', method: 'tools/call',
+    params: { name: 'toolbox__load_skill', arguments: { skillId: 'runtime-probe' } },
+  }, 'codex')).text);
+  expect(mount.error).toBeUndefined();
+  const outputFile = path.join(g.dir, 'stdio-alias.json');
+  const child = spawn('node', ['--import', 'tsx/esm', 'tests/fixtures/check-stdio-online.ts', g.url, outputFile, 'alias', 'codex-mcp-client'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  children.push(child);
+  let logs = '';
+  child.stderr?.on('data', b => { logs += String(b); });
+  await new Promise<void>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('exit', code => code === 0 ? resolve() : reject(new Error(logs)));
+  });
+  const stdio = JSON.parse(fs.readFileSync(outputFile, 'utf8'));
+  expect(stdio.initialize.result.serverInfo.name).toBe('agent-toolbox');
+  expect(stdio.exitCode).toBe(0);
+  const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
+  expect(state.data.auditLogs.filter((event: any) => ['alias-call', 'message-alias-call', 'alias-mount', 'echo'].includes(event.requestPayload.id)).every((event: any) => event.host === 'Codex CLI')).toBe(true);
+  expect(state.data.skills.find((skill: any) => skill.id === 'runtime-probe').mountedBy).toBe('Codex CLI');
+});
 
 networkTest('HTTP forwards real downstream, persists tools and audit across restart, and fails closed after disconnection', async () => {
   const g = await gateway();
@@ -135,8 +203,20 @@ networkTest('HTTP initialize client identity persists through session header, an
 
 networkTest('stdio bridge forwards initialize/notifications/list/call, preserves host and relays SSE list_changed', async () => {
   const g = await gateway();
+  const messageList = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'message-list', method: 'tools/list' }, 'Stdio Test Host')).text);
+  const streamableList = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'streamable-list', method: 'tools/list' }, 'Stdio Test Host', '/api/mcp')).text);
+  expect(streamableList.result.tools).toEqual(messageList.result.tools);
+  const messageCall = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'message-call', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'hello-from-stdio' } },
+  }, 'Stdio Test Host')).text);
+  const streamableCall = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'streamable-call', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'hello-from-stdio' } },
+  }, 'Stdio Test Host', '/api/mcp')).text);
+  expect(streamableCall.result).toEqual(messageCall.result);
   const resultFile = path.join(g.dir, 'stdio.json');
-  const child = spawn('node', ['--import', 'tsx/esm', 'tests/fixtures/check-stdio-online.ts', g.url, resultFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn('node', ['--import', 'tsx/esm', 'tests/fixtures/check-stdio-online.ts', g.url, resultFile, 'rug-pull'], { stdio: ['ignore', 'pipe', 'pipe'] });
   children.push(child);
   let logs = '';
   child.stderr?.on('data', b => { logs += String(b); });
@@ -147,7 +227,19 @@ networkTest('stdio bridge forwards initialize/notifications/list/call, preserves
   const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
   expect(result.initialize.id).toBe('initialize');
   expect(result.list.result.tools.some((t: any) => t.name === 'fixture__echo')).toBe(true);
-  expect(JSON.parse(result.call.result.content[0].text).content[0].text).toBe('hello-from-stdio');
+  expect(result.list.result.tools).toEqual(messageList.result.tools);
+  expect(result.call.result).toEqual(messageCall.result);
+  expect(result.rugPull.error.code).toBe(-32001);
+  const messagesAfterRugPull = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'messages-rug-pull', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'must-not-forward' } },
+  }, 'Stdio Test Host')).text);
+  const streamableAfterRugPull = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'streamable-rug-pull', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'must-not-forward' } },
+  }, 'Stdio Test Host', '/api/mcp')).text);
+  expect(messagesAfterRugPull.error.code).toBe(-32001);
+  expect(streamableAfterRugPull.error.code).toBe(-32001);
   expect(result.notification.method).toBe('notifications/tools/list_changed');
   expect(result.exitCode).toBe(0);
   const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
