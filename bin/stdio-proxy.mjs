@@ -12,6 +12,15 @@ const __dirname = path.dirname(__filename);
 const WORKSPACE_ROOT = path.resolve(__dirname, '..');
 const require = createRequire(import.meta.url);
 
+// Authenticate the HTTP leg without changing the local stdio pipe protocol.
+function gatewayHeaders() {
+  const directory = process.env.TOOLBOX_DATA_FILE
+    ? path.dirname(path.resolve(process.env.TOOLBOX_DATA_FILE))
+    : path.join(WORKSPACE_ROOT, 'data');
+  const token = process.env.TOOLBOX_MCP_TOKEN || fs.readFileSync(path.join(directory, 'mcp-token'), 'utf8').trim();
+  return { Authorization: `Bearer ${token}` };
+}
+
 function getFlagValue(args, flag) {
   const idx = args.indexOf(flag);
   if (idx !== -1 && idx + 1 < args.length) return args[idx + 1];
@@ -155,7 +164,7 @@ async function subscribeNotifications(baseUrl, host, abortSignal) {
   while (!abortSignal.aborted) {
     try {
       const res = await fetch(sseUrl, {
-        headers: { Accept: 'text/event-stream', 'X-Toolbox-Host': host },
+        headers: { ...gatewayHeaders(), Accept: 'text/event-stream', 'X-Toolbox-Host': host },
         signal: abortSignal,
       });
       if (!res.ok || !res.body) {
@@ -238,6 +247,7 @@ async function main() {
         const res = await fetch(`${baseUrl}/api/mcp?host=${encodeURIComponent(host)}`, {
           method: 'POST',
           headers: {
+            ...gatewayHeaders(),
             'Content-Type': 'application/json',
             Accept: 'application/json',
             'X-Toolbox-Host': host,

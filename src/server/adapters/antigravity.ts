@@ -1,3 +1,4 @@
+import { mcpHeaders } from '../mcpCredentials';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -22,7 +23,7 @@ export function antigravityConfigPath(): string {
 
 export function antigravityInstallEntry(options: { workspaceRoot: string; transport: AntigravityTransport; baseUrl: string }): Record<string, unknown> {
   const base = options.baseUrl.replace(/\/$/, '');
-  if (options.transport === 'http') return { serverUrl: `${base}/api/mcp?host=antigravity` };
+  if (options.transport === 'http') return { headers: mcpHeaders(), serverUrl: `${base}/api/mcp?host=antigravity` };
   return stdioLaunch(options.workspaceRoot, 'antigravity');
 }
 

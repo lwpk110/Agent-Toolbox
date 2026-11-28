@@ -1,3 +1,4 @@
+import { mcpHeaders } from '../mcpCredentials';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -21,8 +22,8 @@ export function claudeConfigPath(): string {
 
 export function claudeInstallEntry(options: { workspaceRoot: string; transport: ClaudeTransport; baseUrl: string }): Record<string, unknown> {
   const base = options.baseUrl.replace(/\/$/, '');
-  if (options.transport === 'sse') return { type: 'sse', url: `${base}/api/mcp/sse?host=claude-code` };
-  if (options.transport === 'http') return { type: 'http', url: `${base}/api/mcp?host=claude-code` };
+  if (options.transport === 'sse') return { headers: mcpHeaders(), type: 'sse', url: `${base}/api/mcp/sse?host=claude-code` };
+  if (options.transport === 'http') return { headers: mcpHeaders(), type: 'http', url: `${base}/api/mcp?host=claude-code` };
   return stdioLaunch(options.workspaceRoot, 'claude-code');
 }
 

@@ -1,3 +1,4 @@
+import { buildCodexTomlBlock } from './adapters/codex';
 import crypto from 'crypto';
 import path from 'node:path';
 import { RpcError } from './rpcError';
@@ -49,7 +50,7 @@ import type {
 } from '../types/toolbox';
 
 function codexConfigSnippet() {
-  return `# 写入 Codex config.toml\n[mcp_servers.agent-toolbox]\ncommand = "bun"\nargs = [${JSON.stringify(path.resolve('src/cli/serve-stdio.ts'))}]\nenv = { TOOLBOX_HOST = "Codex CLI" }`;
+  return `# 写入 Codex config.toml\n[mcp_servers.agent-toolbox]\ncommand = "bun"\nargs = [${JSON.stringify(path.resolve('src/cli/serve-stdio.ts'))}]\nenv = { TOOLBOX_HOST = "Codex CLI" }\n\n# HTTP\n${buildCodexTomlBlock('http')}`;
 }
 
 const FULL_EXPOSURE_TOKENS = 18170;
@@ -1420,7 +1421,8 @@ export class GatewayStore {
   private persistedState(): PersistedGatewayState {
     return {
       stdioMcpSeedVersion: 1,
-      hosts: this.hosts,
+      hosts: this.hosts.map(host => ['claude', 'antigravity', 'opencode', 'codex'].includes(host.id)
+        ? { ...host, configSnippet: '' } : host),
       middleware: this.middleware,
       servers: this.servers,
       quarantines: this.quarantines,
