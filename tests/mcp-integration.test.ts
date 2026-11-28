@@ -544,6 +544,13 @@ networkTest('downstream poison names always retain their own service namespace',
     expect(call.error).toBeDefined();
     expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
   }
+  const casedMeta = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'cased-meta', method: 'tools/call',
+    params: { name: 'ToolBox__call_tool', arguments: { toolName: 'fixture__echo', arguments: { text: 'cased-meta' } } },
+  })).text);
+  expect(casedMeta.error).toBeUndefined();
+  expect(JSON.parse(casedMeta.result.content[0].text).content[0].text).toBe('cased-meta');
+  expect(JSON.stringify(casedMeta)).not.toContain('namespace-fixture:');
 });
 
 networkTest('reserved service namespaces are rejected without replacing real meta tools', async () => {
@@ -560,5 +567,89 @@ networkTest('reserved service namespaces are rejected without replacing real met
   expect(listed.result.tools.filter((t: any) => t.name === 'toolbox__call_tool').length).toBe(1);
   const call = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'reserved-call', method: 'tools/call', params: { name: 'toolbox__call_tool', arguments: {} } })).text);
   expect(call.error).toBeDefined();
+  expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
+});
+
+networkTest('later Skill cannot take over an enabled service tool name', async () => {
+  const g = await gateway();
+  const created = await fetch(`${g.url}/api/v1/skills`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ id: 'name-collision', skillMarkdown: '# Collision\n\nA colliding skill.', toolName: 'fixture__echo' }),
+  });
+  expect(created.ok).toBe(true);
+  const mount = await fetch(`${g.url}/api/v1/skills/name-collision/mount`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ host: 'Codex CLI' }),
+  });
+  expect(mount.ok).toBe(false);
+  const load = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'load-collision', method: 'tools/call',
+    params: { name: 'toolbox__load_skill', arguments: { skillId: 'name-collision' } },
+  })).text);
+  expect(load.error).toBeDefined();
+  const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
+  expect(state.data.skills.find((skill: any) => skill.id === 'name-collision').mounted).toBe(false);
+  expect(g.logs()).toContain('Namespace collision rejected for Skill name-collision');
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'after-skill', method: 'tools/list' })).text);
+  expect(listed.result.tools.filter((tool: any) => tool.name === 'fixture__echo').length).toBe(1);
+  const call = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'still-echo', method: 'tools/call',
+    params: { name: 'fixture__echo', arguments: { text: 'skill-must-not-take-over' } },
+  })).text);
+  expect(JSON.parse(call.result.content[0].text).content[0].text).toBe('skill-must-not-take-over');
+});
+
+networkTest('later service with a colliding normalized prefix is isolated', async () => {
+  const g = await gateway();
+  const seed = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'seed-prefix', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/echo-mcp.ts')],
+      cwd: process.cwd(), defaultMode: 'pinned',
+    }),
+  });
+  expect(seed.ok).toBe(true);
+  await delay(400);
+  await stop(g.child);
+  const statePath = path.join(g.dir, 'state.json');
+  const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  const earlier = persisted.servers.find((server: any) => server.id === 'seed-prefix');
+  expect(earlier).toBeDefined();
+  earlier.id = 'foo_bar';
+  earlier.name = 'foo_bar';
+  for (const tool of earlier.tools || []) {
+    tool.serverId = 'foo_bar';
+    if (typeof tool.name === 'string' && tool.name.startsWith('seed_prefix__')) {
+      tool.name = `foo_bar__${tool.name.slice('seed_prefix__'.length)}`;
+    }
+  }
+  fs.writeFileSync(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+  await g.start();
+  const before = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'prefix-before', method: 'tools/list' })).text);
+  expect(before.result.tools.some((tool: any) => tool.name === 'foo_bar__echo')).toBe(true);
+  const later = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'foo-bar', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/namespace-poison-mcp.ts')],
+      cwd: process.cwd(), defaultMode: 'pinned',
+    }),
+  });
+  expect(later.ok).toBe(true);
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'prefix-after', method: 'tools/list' })).text);
+  const names = listed.result.tools.map((tool: any) => tool.name);
+  expect(names.filter((name: string) => name === 'foo_bar__echo').length).toBe(1);
+  expect(names).not.toContain('foo_bar__toolbox__call_tool');
+  expect(names).not.toContain('foo_bar__github__create_issue');
+  expect(g.logs()).toContain('Namespace collision rejected for service foo-bar');
+  const snapshot: any = await (await fetch(`${g.url}/api/v1/state`)).json();
+  expect(snapshot.data.servers.find((server: any) => server.id === 'foo-bar').tools).toEqual([]);
+  const call = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'first-wins', method: 'tools/call',
+    params: { name: 'foo_bar__echo', arguments: { text: 'first-wins' } },
+  })).text);
+  expect(call.error).toBeUndefined();
+  expect(JSON.parse(call.result.content[0].text).content[0].text).toBe('first-wins');
   expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
 });
