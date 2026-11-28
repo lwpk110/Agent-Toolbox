@@ -58,6 +58,72 @@ interface EncryptedSecret {
   ciphertext: string;
 }
 
+export interface GitHubSyncRemote {
+  putFile(input: { repo: string; branch: string; path: string; content: string; message: string; token: string }): Promise<string>;
+  getFile(input: { repo: string; branch: string; path: string; token: string }): Promise<string>;
+}
+
+class GitHubContentsRemote implements GitHubSyncRemote {
+  private readonly baseUrl = (process.env.TOOLBOX_GITHUB_API_URL || 'https://api.github.com').replace(/\/$/, '');
+
+  private async ensureBranch(repo: string, branch: string, token: string): Promise<void> {
+    const headers = this.headers(token);
+    const refUrl = `${this.baseUrl}/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`;
+    const existing = await fetch(refUrl, { headers });
+    if (existing.ok) return;
+    if (existing.status !== 404) {
+      const body = await existing.json() as { message?: string };
+      throw new Error(`GitHub sync failed (${existing.status}): ${body.message || 'branch lookup failed'}`);
+    }
+    const repository = await fetch(`${this.baseUrl}/repos/${repo}`, { headers });
+    const repositoryBody = await repository.json() as { default_branch?: string; message?: string };
+    if (!repository.ok || !repositoryBody.default_branch) throw new Error(`GitHub sync failed (${repository.status}): ${repositoryBody.message || 'default branch unavailable'}`);
+    const baseRef = await fetch(`${this.baseUrl}/repos/${repo}/git/ref/heads/${encodeURIComponent(repositoryBody.default_branch)}`, { headers });
+    const baseBody = await baseRef.json() as { object?: { sha?: string }; message?: string };
+    if (!baseRef.ok || !baseBody.object?.sha) throw new Error(`GitHub sync failed (${baseRef.status}): ${baseBody.message || 'default branch head unavailable'}`);
+    const created = await fetch(`${this.baseUrl}/repos/${repo}/git/refs`, {
+      method: 'POST', headers, body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseBody.object.sha }),
+    });
+    if (!created.ok) {
+      const result = await created.json() as { message?: string };
+      throw new Error(`GitHub sync failed (${created.status}): ${result.message || 'branch creation failed'}`);
+    }
+  }
+
+  async putFile(input: { repo: string; branch: string; path: string; content: string; message: string; token: string }): Promise<string> {
+    await this.ensureBranch(input.repo, input.branch, input.token);
+    const existing = await this.request(input, 'GET');
+    const response = await fetch(`${this.baseUrl}/repos/${input.repo}/contents/${input.path.split('/').map(encodeURIComponent).join('/')}`, {
+      method: 'PUT',
+      headers: this.headers(input.token),
+      body: JSON.stringify({ message: input.message, content: Buffer.from(input.content).toString('base64'), branch: input.branch, ...(existing?.sha ? { sha: existing.sha } : {}) }),
+    });
+    const result = await response.json() as { commit?: { sha?: string }; message?: string };
+    if (!response.ok || !result.commit?.sha) throw new Error(`GitHub sync failed (${response.status}): ${result.message || 'commit SHA missing'}`);
+    return result.commit.sha;
+  }
+
+  async getFile(input: { repo: string; branch: string; path: string; token: string }): Promise<string> {
+    const result = await this.request(input, 'GET');
+    if (!result) throw new Error(`GitHub sync file not found: ${input.path}`);
+    return Buffer.from(result.content.replace(/\n/g, ''), 'base64').toString('utf8');
+  }
+
+  private headers(token: string): Record<string, string> {
+    return { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28' };
+  }
+
+  private async request(input: { repo: string; branch: string; path: string; token: string }, method: 'GET') {
+    const url = new URL(`${this.baseUrl}/repos/${input.repo}/contents/${input.path.split('/').map(encodeURIComponent).join('/')}`);
+    url.searchParams.set('ref', input.branch);
+    const response = await fetch(url, { method, headers: this.headers(input.token) });
+    if (response.status === 404) return undefined;
+    const result = await response.json() as { sha?: string; content: string; message?: string };
+    if (!response.ok) throw new Error(`GitHub sync failed (${response.status}): ${result.message || 'request failed'}`);
+    return result;
+  }
+}
+
 function encryptSecret(plaintext: string, masterKey: Buffer): EncryptedSecret {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', masterKey, iv);
@@ -498,6 +564,7 @@ export class GatewayStore {
   public readonly events = new EventEmitter();
   private readonly persistence: GatewayPersistence;
   private readonly toolboxLock: ToolboxLockFile;
+  private readonly githubSyncRemote: GitHubSyncRemote;
   private readonly downstream = new DownstreamMcp(server => {
     if (server.state !== 'quarantined') server.state = 'offline';
     this.emitEvent('server.disconnected', { serverId: server.id });
@@ -1287,13 +1354,13 @@ export class GatewayStore {
   private encryptedSecrets = new Map<string, EncryptedSecret>();
 
   private sync: SyncStatus = {
-    repo: 'github.com/dev-team/agent-toolbox-hub',
-    branch: 'main',
-    commitHash: 'a9c31e2',
-    ahead: 2,
+    repo: 'lwpk110/Agent-Toolbox',
+    branch: 'toolbox-sync',
+    commitHash: '',
+    ahead: 0,
     pushed: false,
     lastSyncedAt: null,
-    lastCommitMessage: 'chore(toolbox): initialize gateway manifest and lockfile',
+    lastCommitMessage: '',
   };
 
   private lastSyncedManifestJson = JSON.stringify(
@@ -1309,6 +1376,8 @@ export class GatewayStore {
     null,
     2
   );
+  private syncedLockfileJson: string | undefined;
+  private syncedManifestJson: string | undefined;
 
   private pendingApprovals: HitlApproval[] = [];
   private auditLogs: AuditRpcEvent[] = [];
@@ -1317,9 +1386,10 @@ export class GatewayStore {
     showFixtures: process.env.TOOLBOX_FIXTURE !== 'off',
   };
 
-  constructor(options: { dataFile?: string; lockFile?: string } = {}) {
+  constructor(options: { dataFile?: string; lockFile?: string; githubSyncRemote?: GitHubSyncRemote } = {}) {
     this.persistence = new GatewayPersistence(options.dataFile);
     this.toolboxLock = new ToolboxLockFile(options.lockFile);
+    this.githubSyncRemote = options.githubSyncRemote || new GitHubContentsRemote();
     process.once('exit', () => this.downstream.close());
     const saved = this.persistence.load();
     if (saved) {
@@ -1354,6 +1424,8 @@ export class GatewayStore {
       encryptedSecrets: Object.fromEntries(this.encryptedSecrets),
       sync: this.sync,
       lastSyncedManifestJson: this.lastSyncedManifestJson,
+      syncedManifestJson: this.syncedManifestJson,
+      syncedLockfileJson: this.syncedLockfileJson,
       pendingApprovals: this.pendingApprovals,
       auditLogs: this.auditLogs,
       visibility: this.visibility,
@@ -1366,8 +1438,20 @@ export class GatewayStore {
       if (Array.isArray(saved[field])) Object.assign(this, { [field]: saved[field] });
     }
     if (saved.vectorHealth && typeof saved.vectorHealth === 'object') this.vectorHealth = saved.vectorHealth as VectorHealthStats;
-    if (saved.sync && typeof saved.sync === 'object') this.sync = saved.sync as SyncStatus;
+    if (saved.sync && typeof saved.sync === 'object') {
+      this.sync = saved.sync as SyncStatus;
+      if (this.sync.repo === 'github.com/dev-team/agent-toolbox-hub' || this.sync.repo === 'dev-team/agent-toolbox-hub' || this.sync.branch === 'main') {
+        this.sync.repo = 'lwpk110/Agent-Toolbox';
+        this.sync.branch = 'toolbox-sync';
+        this.sync.commitHash = '';
+        this.sync.pushed = false;
+        this.sync.ahead = 0;
+        this.sync.lastCommitMessage = '';
+      }
+    }
     if (typeof saved.lastSyncedManifestJson === 'string') this.lastSyncedManifestJson = saved.lastSyncedManifestJson;
+    if (typeof saved.syncedManifestJson === 'string') this.syncedManifestJson = saved.syncedManifestJson;
+    if (typeof saved.syncedLockfileJson === 'string') this.syncedLockfileJson = saved.syncedLockfileJson;
     if (saved.visibility && typeof saved.visibility === 'object') {
       const visibility = saved.visibility as Partial<VisibilitySettings>;
       this.visibility = {
@@ -1422,6 +1506,7 @@ export class GatewayStore {
 
   public setVisibility(patch: Partial<VisibilitySettings>): VisibilitySettings {
     this.visibility = { ...this.visibility, ...patch };
+    this.markDirty();
     this.emitEvent('settings.changed', this.getVisibility());
     return this.getVisibility();
   }
@@ -1452,6 +1537,8 @@ export class GatewayStore {
   private markDirty() {
     this.sync.pushed = false;
     this.sync.ahead = Math.max(1, this.sync.ahead + 1);
+    this.syncedManifestJson = undefined;
+    this.syncedLockfileJson = undefined;
   }
 
   public isMiddlewareEnabled(id: MiddlewareId): boolean {
@@ -1511,6 +1598,17 @@ export class GatewayStore {
       }));
     const skills = this.skills.filter((skill) => this.isOriginVisible(skill.origin));
     const vault = this.getVaultEntriesWithRefs().filter((entry) => this.isOriginVisible(entry.origin));
+    const knownVaultKeys = new Set(vault.map(entry => entry.key));
+    for (const server of servers) {
+      const values = [server.secretRef, ...(server.args || []), ...Object.values(server.env || {}), ...Object.values(server.headers || {})];
+      for (const value of values) {
+        for (const [, key] of value?.matchAll(/vault:\/\/([A-Z0-9_]+)/g) || []) {
+          if (knownVaultKeys.has(key)) continue;
+          vault.push({ origin: server.origin, key, serviceName: server.name, maskedValue: '', configured: false, updatedAt: '', referencedBy: [server.name] });
+          knownVaultKeys.add(key);
+        }
+      }
+    }
     const missing = vault.filter((entry) => !entry.configured);
     const quarantined = servers.filter((server) => server.state === 'quarantined');
 
@@ -1590,8 +1688,8 @@ export class GatewayStore {
       ready,
       blockingReason,
       checks,
-      manifestJson,
-      lockfileJson,
+      manifestJson: this.syncedManifestJson ?? manifestJson,
+      lockfileJson: this.syncedLockfileJson ?? lockfileJson,
       diffLines: computeLineDiff(this.lastSyncedManifestJson, manifestJson),
     };
   }
@@ -2830,37 +2928,80 @@ export class GatewayStore {
 
   public updateSyncConfig(input: { repo?: string; branch?: string }): SyncStatus {
     if (typeof input.repo === 'string' && input.repo.trim()) {
-      this.sync.repo = input.repo.trim().slice(0, 120);
+      const repo = input.repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\.git$/, '');
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) throw new RpcError(-32602, 'Repository must use owner/repository format.');
+      this.sync.repo = repo.slice(0, 120);
     }
     if (typeof input.branch === 'string' && input.branch.trim()) {
-      this.sync.branch = input.branch.trim().slice(0, 60);
+      const branch = input.branch.trim();
+      if (branch === 'main' || !/^[A-Za-z0-9._/-]{1,60}$/.test(branch) || branch.includes('..')) throw new RpcError(-32602, 'GitHub sync requires a valid dedicated branch, not main.');
+      this.sync.branch = branch;
     }
     this.markDirty();
     this.emitEvent('sync.config_updated', this.sync);
     return this.sync;
   }
 
-  public pushToGitHub(commitMessage?: string): { ok: boolean; error?: string; sync: SyncStatus } {
+  private githubSyncToken(): string {
+    const key = this.encryptedSecrets.get('GITHUB_SYNC_PAT');
+    if (!key) throw new Error('Vault secret GITHUB_SYNC_PAT is missing.');
+    return decryptSecret(key, this.persistence.vaultKey);
+  }
+
+  public async pushToGitHub(commitMessage?: string): Promise<{ ok: boolean; error?: string; sync: SyncStatus }> {
     const preflight = this.getPreflight();
     if (!preflight.ready) {
       return { ok: false, error: preflight.blockingReason, sync: this.sync };
     }
-    this.sync.pushed = true;
-    this.sync.ahead = 0;
-    this.sync.commitHash = crypto.randomBytes(4).toString('hex').slice(0, 7);
-    this.sync.lastSyncedAt = new Date().toISOString();
-    if (commitMessage && commitMessage.trim()) {
-      this.sync.lastCommitMessage = commitMessage.trim().slice(0, 140);
+    try {
+      const token = this.githubSyncToken();
+      if (this.sync.branch === 'main') throw new Error('GitHub sync cannot target main.');
+      const message = (commitMessage?.trim() || 'chore(sync): update toolbox manifest and lock').slice(0, 140);
+      const contents = [
+        ['sync/toolbox.manifest.json', preflight.manifestJson],
+        ['sync/toolbox.lock.json', preflight.lockfileJson],
+      ] as const;
+      let commitHash = '';
+      for (const [file, content] of contents) {
+        commitHash = await this.githubSyncRemote.putFile({ repo: this.sync.repo, branch: this.sync.branch, path: file, content, message, token });
+      }
+      this.sync.pushed = true;
+      this.sync.ahead = 0;
+      this.sync.commitHash = commitHash;
+      this.sync.lastSyncedAt = new Date().toISOString();
+      this.sync.lastCommitMessage = message;
+      this.lastSyncedManifestJson = preflight.manifestJson;
+      this.emitEvent('sync.pushed', this.sync);
+      return { ok: true, sync: this.sync };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'GitHub push failed.', sync: this.sync };
     }
-    this.lastSyncedManifestJson = preflight.manifestJson;
-    this.emitEvent('sync.pushed', this.sync);
-    return { ok: true, sync: this.sync };
   }
 
-  public pullFromGitHub(): { status: string; sync: SyncStatus } {
-    this.sync.lastSyncedAt = new Date().toISOString();
-    this.scheduleSave();
-    return { status: `已是最新：GitHub 远端 ${this.sync.branch} 分支没有新的改动。`, sync: this.sync };
+  public async pullFromGitHub(): Promise<{ ok: boolean; status: string; error?: string; sync: SyncStatus }> {
+    try {
+      const token = this.githubSyncToken();
+      if (this.sync.branch === 'main') throw new Error('GitHub sync cannot target main.');
+      const manifest = await this.githubSyncRemote.getFile({ repo: this.sync.repo, branch: this.sync.branch, path: 'sync/toolbox.manifest.json', token });
+      const lock = await this.githubSyncRemote.getFile({ repo: this.sync.repo, branch: this.sync.branch, path: 'sync/toolbox.lock.json', token });
+      const parsedManifest: unknown = JSON.parse(manifest);
+      const parsedLock: unknown = JSON.parse(lock);
+      if (!parsedManifest || typeof parsedManifest !== 'object' || !parsedLock || typeof parsedLock !== 'object') throw new Error('GitHub sync files must contain JSON objects.');
+      const knownSecrets = [...this.encryptedSecrets.values()].map(secret => decryptSecret(secret, this.persistence.vaultKey));
+      if ([...REDACTION_PATTERNS].some(pattern => { pattern.lastIndex = 0; return pattern.test(manifest) || pattern.test(lock); }) || knownSecrets.some(secret => secret.length >= 8 && (manifest.includes(secret) || lock.includes(secret)))) {
+        throw new Error('GitHub sync content contains plaintext credentials.');
+      }
+      this.lastSyncedManifestJson = JSON.stringify(parsedManifest, null, 2);
+      this.syncedManifestJson = this.lastSyncedManifestJson;
+      this.syncedLockfileJson = JSON.stringify(parsedLock, null, 2);
+      this.sync.pushed = true;
+      this.sync.ahead = 0;
+      this.sync.lastSyncedAt = new Date().toISOString();
+      this.emitEvent('sync.pulled', this.sync);
+      return { ok: true, status: `已从 GitHub ${this.sync.branch} 分支拉取同步清单与锁文件。`, sync: this.sync };
+    } catch (error) {
+      return { ok: false, status: '', error: error instanceof Error ? error.message : 'GitHub pull failed.', sync: this.sync };
+    }
   }
 
   public resolveHitlApproval(approvalId: string, decision: 'approve' | 'reject'): HitlApproval | null {

@@ -939,26 +939,35 @@ app.get('/api/v1/sync/preflight', (_req, res) => {
 
 app.patch('/api/v1/sync/config', (req, res) => {
   const { repo, branch } = req.body || {};
-  gatewayStore.updateSyncConfig({
-    repo: typeof repo === 'string' ? repo : undefined,
-    branch: typeof branch === 'string' ? branch : undefined,
-  });
-  sendOk(res, gatewayStore.getSnapshot());
+  try {
+    gatewayStore.updateSyncConfig({
+      repo: typeof repo === 'string' ? repo : undefined,
+      branch: typeof branch === 'string' ? branch : undefined,
+    });
+    sendOk(res, gatewayStore.getSnapshot());
+  } catch (error) {
+    sendErr(res, 400, 'INVALID_SYNC_CONFIG', error instanceof Error ? error.message : 'Invalid sync config.');
+  }
 });
 
-app.post('/api/v1/sync/pull', (_req, res) => {
-  const result = gatewayStore.pullFromGitHub();
+app.post('/api/v1/sync/pull', async (_req, res) => {
+  const result = await gatewayStore.pullFromGitHub();
+  if (!result.ok) {
+    sendErr(res, 502, 'GITHUB_SYNC_FAILED', result.error || 'GitHub pull failed.');
+    return;
+  }
   sendOk(res, gatewayStore.getSnapshot(), { message: result.status });
 });
 
-app.post('/api/v1/sync/push', (req, res) => {
+app.post('/api/v1/sync/push', async (req, res) => {
   const commitMessage = typeof req.body?.commitMessage === 'string' ? req.body.commitMessage : undefined;
-  const result = gatewayStore.pushToGitHub(commitMessage);
+  const result = await gatewayStore.pushToGitHub(commitMessage);
   if (!result.ok) {
-    sendErr(res, 409, 'PREFLIGHT_BLOCKED', result.error || '推送前检查未通过。');
+    const blocked = !gatewayStore.getPreflight().ready;
+    sendErr(res, blocked ? 409 : 502, blocked ? 'PREFLIGHT_BLOCKED' : 'GITHUB_SYNC_FAILED', result.error || '推送前检查未通过。');
     return;
   }
-  sendOk(res, gatewayStore.getSnapshot());
+  sendOk(res, gatewayStore.getSnapshot(), { commitHash: result.sync.commitHash });
 });
 
 app.post('/api/v1/hitl/:id/resolve', (req, res) => {
