@@ -54,7 +54,7 @@ test('handshake failure and timeout fail closed while downstream tool errors ret
   const result = await run('check-downstream-faults');
   expect(result.handshakeState).toBe('offline');
   expect(result.handshake.error.code).toBe(-32006);
-  expect(result.timeout.id).toBe('fault__timeout');
+  expect(result.timeout.id).toBe('timeout__run');
   expect(result.timeout.error.code).toBe(-32006);
   expect(result.toolError.result.isError).toBe(true);
   expect(JSON.parse(result.toolError.result.content[0].text).content[0].text).toBe('tool execution failed');

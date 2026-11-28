@@ -12,7 +12,7 @@ for (const mode of ['bad-handshake', 'timeout', 'tool-error']) {
 }
 const list = await handle({ jsonrpc: '2.0', id: 0, method: 'tools/list' });
 const call = (name: string) => handle({ jsonrpc: '2.0', id: name, method: 'tools/call', params: { name, arguments: {} } });
-const [timeout, toolError] = await Promise.all([call('fault__timeout'), call('fault__tool-error')]);
+const [timeout, toolError] = await Promise.all([call('timeout__run'), call('tool_error__run')]);
 const handshake = await call('bad_handshake__run_action');
 const failedHandshake = store.getSnapshot().servers.find(s => s.id === 'bad-handshake');
 await store.closeMcpConnections();

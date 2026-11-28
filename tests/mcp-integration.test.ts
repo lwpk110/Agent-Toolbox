@@ -517,3 +517,48 @@ networkTest('loopback startup accepts authenticated real tools with local or abs
   }
   expect(g.logs().includes('listening on http://127.0.0.1:')).toBe(true);
 });
+
+networkTest('downstream poison names always retain their own service namespace', async () => {
+  const g = await gateway();
+  const added = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'poison', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/namespace-poison-mcp.ts')],
+      cwd: process.cwd(), defaultMode: 'pinned' }),
+  });
+  expect(added.ok).toBe(true);
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'names', method: 'tools/list' })).text);
+  const names = listed.result.tools.map((t: any) => t.name);
+  expect(names).not.toContain('github__create_issue');
+  expect(names).not.toContain('ToolBox__remember');
+  expect(names.filter((n: string) => n === 'toolbox__call_tool').length).toBe(1);
+  for (const original of ['echo', 'toolbox__call_tool', 'ToolBox__remember', 'github__create_issue']) {
+    expect(names).toContain(`poison__${original}`);
+    const call = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: original, method: 'tools/call',
+      params: { name: `poison__${original}`, arguments: {} } })).text);
+    expect(call.error).toBeUndefined();
+    expect(call.result.content[0].text).toContain(`namespace-fixture:${original}`);
+  }
+  for (const name of ['github__create_issue', 'ToolBox__remember', 'toolbox__call_tool']) {
+    const call = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: name, method: 'tools/call', params: { name, arguments: {} } })).text);
+    expect(call.error).toBeDefined();
+    expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
+  }
+});
+
+networkTest('reserved service namespaces are rejected without replacing real meta tools', async () => {
+  const g = await gateway();
+  for (const name of ['toolbox', 'ToolBox']) {
+    const response = await fetch(`${g.url}/api/v1/servers`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, protocol: 'stdio', commandOrUrl: 'node', defaultMode: 'pinned',
+        args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/namespace-poison-mcp.ts')] }),
+    });
+    expect(response.ok).toBe(false);
+  }
+  const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'reserved-list', method: 'tools/list' })).text);
+  expect(listed.result.tools.filter((t: any) => t.name === 'toolbox__call_tool').length).toBe(1);
+  const call = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'reserved-call', method: 'tools/call', params: { name: 'toolbox__call_tool', arguments: {} } })).text);
+  expect(call.error).toBeDefined();
+  expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
+});

@@ -1956,6 +1956,9 @@ export class GatewayStore {
     if (!/^[a-z0-9-]+$/.test(id)) {
       return { error: '命名空间仅支持小写字母、数字和连字符（例如 linear-mcp）。' };
     }
+    if (this.servicePrefix(id).toLowerCase() === 'toolbox__') {
+      return { error: 'Reserved MCP namespace: toolbox__' };
+    }
     if (this.servers.some((s) => s.id === id || s.name.toLowerCase() === id)) {
       return { error: `命名空间「${id}」已存在，请换一个名称。` };
     }
@@ -2365,6 +2368,14 @@ export class GatewayStore {
   public mountSkill(skillId: string, host = 'Claude Code'): DualLayerSkill | null {
     const skill = this.skills.find((s) => s.id === skillId);
     if (!skill) return null;
+    const names = skill.attachedTools.map(tool => tool.name);
+    if (new Set(names).size !== names.length || names.some(name => /^toolbox__/i.test(name)
+      || this.servers.some(server => server.enabled && server.tools.some(tool => tool.name === name))
+      || this.skills.some(other => other !== skill && other.mounted && other.attachedTools.some(tool => tool.name === name)))) {
+      console.error(`[mcp] Namespace collision rejected for Skill ${skill.id}`);
+      this.emitEvent('skill.namespace_conflict', { skillId });
+      return null;
+    }
     skill.mounted = true;
     skill.mountedBy = host;
     this.markDirty();
@@ -3132,7 +3143,7 @@ export class GatewayStore {
       if (server.state !== 'quarantined' && (server.connectOnStart === false || server.protocol !== 'stdio' || !server.enabled)) server.state = 'offline';
     }
     const active = this.servers.filter(s => (!serverId || s.id === serverId) && s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false);
-    await Promise.all(active.map(async server => {
+    for (const server of active) {
       try {
         const tools = await this.downstream.list(server);
         this.acceptDownstreamTools(server, tools);
@@ -3141,10 +3152,34 @@ export class GatewayStore {
         console.error(`[mcp] ${server.id}: ${String(error)}`);
         if (server.state !== 'quarantined') server.state = 'offline';
       }
-    }));
+    }
+  }
+
+  private servicePrefix(serverId: string): string {
+    return `${serverId.replace(/-/g, '_')}__`;
+  }
+
+  private assertServiceNames(server: McpServer, names: string[]) {
+    const prefix = this.servicePrefix(server.id);
+    const earlier = this.servers.slice(0, this.servers.indexOf(server));
+    const conflict = prefix.toLowerCase() === 'toolbox__'
+      || earlier.some(other => other.enabled && this.servicePrefix(other.id) === prefix)
+      || new Set(names).size !== names.length
+      || names.some(name => /^toolbox__/i.test(name)
+        || this.servers.some(other => other !== server && other.enabled && other.tools.some(tool => tool.name === name))
+        || this.skills.some(skill => skill.mounted && skill.attachedTools.some(tool => tool.name === name)));
+    if (conflict) {
+      server.tools = [];
+      server.resources = [];
+      server.prompts = [];
+      console.error(`[mcp] Namespace collision rejected for service ${server.id}`);
+      this.emitEvent('server.namespace_conflict', { serverId: server.id });
+      throw new RpcError(-32602, `Namespace collision rejected for service ${server.id}`);
+    }
   }
 
   private acceptDownstreamTools(server: McpServer, liveTools: Awaited<ReturnType<DownstreamMcp['list']>>) {
+    this.assertServiceNames(server, liveTools.map(tool => `${this.servicePrefix(server.id)}${tool.name}`));
     const lock = this.toolboxLock.get(server.id);
     const corruptLock = !this.toolboxLock.valid;
     if (!corruptLock && !lock) this.toolboxLock.writeServer(server.id, liveTools);
@@ -3152,7 +3187,7 @@ export class GatewayStore {
     const mismatches = liveTools.filter(tool => corruptLock || !locked?.tools[tool.name] || locked.tools[tool.name] !== toolFingerprint(tool));
     const previousTools = server.tools;
     server.tools = liveTools.map(tool => {
-      const name = tool.name.includes('__') ? tool.name : `${server.id.replace(/-/g, '_')}__${tool.name}`;
+      const name = `${this.servicePrefix(server.id)}${tool.name}`;
       const existing = server.tools.find(item => item.name === name);
       return {
         origin: server.origin || 'real',
@@ -3166,17 +3201,18 @@ export class GatewayStore {
     if (mismatches.length) {
       server.state = 'quarantined';
       for (const tool of mismatches) {
-        const baseline = previousTools.find(item => item.name === tool.name);
+        const exposedName = `${this.servicePrefix(server.id)}${tool.name}`;
+        const baseline = previousTools.find(item => item.name === exposedName);
         const expected = locked?.tools[tool.name] || '';
         const actual = toolFingerprint(tool);
-        const previousRecord = this.quarantines.find(item => item.serverId === server.id && item.toolName === tool.name && item.actualHash === `sha256:${actual}`);
+        const previousRecord = this.quarantines.find(item => item.serverId === server.id && item.toolName === exposedName && item.actualHash === `sha256:${actual}`);
         if (previousRecord) continue;
         const baselineSchema = baseline?.inputSchema ? JSON.stringify(baseline.inputSchema, null, 2) : '';
         const liveSchema = JSON.stringify(tool.inputSchema ?? {}, null, 2);
         const record: QuarantineRecord = {
           origin: server.origin || 'real',
           serverId: server.id,
-          toolName: tool.name,
+          toolName: exposedName,
           expectedHash: `sha256:${expected}`,
           actualHash: `sha256:${actual}`,
           baselineDescription: baseline?.description || '',
@@ -3188,7 +3224,7 @@ export class GatewayStore {
           riskReason: corruptLock ? 'toolbox.lock.json is invalid; real downstream is quarantined.' : 'Live tool schema differs from toolbox.lock.json.',
           detectedAt: new Date().toISOString(),
         };
-        this.quarantines = [record, ...this.quarantines.filter(item => item.serverId !== server.id || item.toolName !== tool.name)];
+        this.quarantines = [record, ...this.quarantines.filter(item => item.serverId !== server.id || item.toolName !== exposedName)];
       }
       this.emitEvent('quarantine.detected', { serverId: server.id });
     } else if (corruptLock) {
@@ -3237,6 +3273,7 @@ export class GatewayStore {
   public getMcpTool(name: string, hostName: string) {
     const meta = metaTools.find(t => t.name === name);
     if (meta) return meta;
+    if (/^toolbox__/i.test(name)) throw new RpcError(-32602, 'Reserved MCP namespace');
     const server = this.servers.find(s => s.tools.some(t => t.name === name));
     if (server && (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures))) throw new RpcError(-32602, 'Unknown tool');
     const tool = server?.tools.find(t => t.name === name);
@@ -3852,7 +3889,7 @@ export class GatewayStore {
     try {
       const discovered = await downstreamPool.connectAndDiscover(server, secrets.env, secrets.headers);
       server.latencyMs = discovered.latencyMs;
-      const prefix = `${server.id.replace(/-/g, '_')}__`;
+      const prefix = this.servicePrefix(server.id);
 
       const existingMap = new Map(server.tools.map((t) => [t.name, t]));
       const detectedDrifts: QuarantineRecord[] = [];
@@ -3897,13 +3934,22 @@ export class GatewayStore {
         };
       });
 
+      this.assertServiceNames(server, nextTools.map(tool => tool.name));
       const quarantinedTool = detectedDrifts[0] || null;
 
-      if (nextTools.length > 0) {
-        server.tools = nextTools;
+      server.tools = nextTools;
+      const resources = discovered.resources.map(resource => ({ ...resource, name: `${prefix}${resource.name}` }));
+      const prompts = discovered.prompts.map(prompt => ({ ...prompt, name: `${prefix}${prompt.name}` }));
+      for (const [kind, entries] of [['resources', resources], ['prompts', prompts]] as const) {
+        const names = entries.map(entry => entry.name);
+        if (new Set(names).size !== names.length || names.some(name => /^toolbox__/i.test(name)
+          || this.servers.some(other => other !== server && other.enabled && other[kind].some(entry => entry.name === name)))) {
+          server[kind] = [];
+          throw new RpcError(-32602, `Namespace collision in ${kind} for service ${server.id}`);
+        }
       }
-      server.resources = discovered.resources;
-      server.prompts = discovered.prompts;
+      server.resources = resources;
+      server.prompts = prompts;
 
       if (quarantinedTool && this.isMiddlewareEnabled('quarantine')) {
         server.state = 'quarantined';
