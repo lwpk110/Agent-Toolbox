@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -89,7 +89,13 @@ test('Codex TOML parser & surgical installer preserve existing config', () => {
   }
 });
 
-test('Codex stdio-proxy + single daemon + real downstream MCP server end-to-end', async () => {
+test('Codex stdio-proxy + single daemon + real downstream MCP server end-to-end', async (context) => {
+  const probe = spawnSync('node', ['-e', `const s = require('node:net').createServer(); s.on('error', e => { require('node:fs').writeSync(1, e.code); process.exit(1); }); s.listen(0, '127.0.0.1', () => s.close());`], { encoding: 'utf8' });
+  if (probe.stdout === 'EPERM' || probe.stdout === 'EACCES') {
+    context.skip('sandbox denies loopback listen (EPERM/EACCES)');
+    return;
+  }
+  assert.equal(probe.status, 0, probe.stderr);
   const testPort = 3299;
   const tmpToolboxHome = fs.mkdtempSync(path.join(os.tmpdir(), 'toolbox-daemon-test-'));
   const prevToolboxHome = process.env.TOOLBOX_HOME;
@@ -332,7 +338,8 @@ test('Multi-platform Codex adapter supports windows, windows-wsl, linux, and mac
       assert.equal(res.targetPlatform, plat);
       assert.match(res.tomlBlock, /stdio-proxy\.mjs/);
       if (plat === 'windows-wsl') {
-        assert.match(res.tomlBlock, /\/mnt\//);
+        // A POSIX workspace remains POSIX; only Windows drive paths become /mnt/.
+        assert.ok(res.tomlBlock.includes(toWslMountPath(WORKSPACE_ROOT)));
       }
 
       const status = getCodexIntegrationStatus({
@@ -361,12 +368,19 @@ test('Multi-platform Codex adapter supports windows, windows-wsl, linux, and mac
     });
     assert.equal(macInstall.ok, false);
 
-    // WSL TOML block built even when detected platform is Windows
+    // Drive conversion is independent of the local filesystem. A workspace
+    // absent on this machine uses the package launcher instead of a proxy.
+    assert.equal(toWslMountPath('D:\\workspace\\github\\Agent-Toolbox\\bin\\stdio-proxy.mjs'), '/mnt/d/workspace/github/Agent-Toolbox/bin/stdio-proxy.mjs');
     const wslToml = buildCodexTomlBlock('stdio', {
       targetPlatform: 'windows-wsl',
       workspaceRoot: 'D:\\workspace\\github\\Agent-Toolbox',
     });
-    assert.match(wslToml, /\/mnt\/d\/workspace\/github\/Agent-Toolbox\/bin\/stdio-proxy\.mjs/);
+    if (fs.existsSync(path.resolve('D:\\workspace\\github\\Agent-Toolbox', 'bin', 'stdio-proxy.mjs'))) {
+      assert.match(wslToml, /\/mnt\/d\/workspace\/github\/Agent-Toolbox\/bin\/stdio-proxy\.mjs/);
+    } else {
+      assert.match(wslToml, /command = "npx"/);
+      assert.match(wslToml, /"agent-toolbox", "serve", "--stdio"/);
+    }
   } finally {
     if (prevOverride === undefined) delete process.env.TOOLBOX_PLATFORM_OVERRIDE;
     else process.env.TOOLBOX_PLATFORM_OVERRIDE = prevOverride;

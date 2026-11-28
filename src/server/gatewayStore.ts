@@ -2531,6 +2531,7 @@ export class GatewayStore {
     };
 
     const docHits = this.docs
+      .filter((doc) => this.isOriginVisible(doc.origin))
       .flatMap((d) =>
         d.chunks.map((chunk) => ({
           doc: d,
@@ -2551,12 +2552,14 @@ export class GatewayStore {
       }));
 
     const memHits = this.memories
+      .filter((memory) => this.isOriginVisible(memory.origin))
       .map((m) => ({ mem: m, score: scoreText(`${m.topic} ${m.content} ${m.host}`) }))
       .filter((x) => x.score >= 0.24)
       .sort((a, b) => b.score - a.score)
       .map((x) => x.mem);
 
     const routingHits = this.skills
+      .filter((skill) => this.isOriginVisible(skill.origin))
       .map((s) => ({ skill: s, score: scoreText(`${s.id} ${s.summary} ${s.skillMarkdown}`) }))
       .filter((x) => x.score >= 0.24)
       .sort((a, b) => b.score - a.score)

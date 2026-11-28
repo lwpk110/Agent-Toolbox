@@ -4,6 +4,8 @@ declare module 'bun:test' {
   export const expect: (value: unknown) => {
     toBe(expected: unknown): void;
     toBeDefined(): void;
+    toBeUndefined(): void;
+    toMatchObject(expected: unknown): void;
     toBeGreaterThan(expected: number): void;
     toContain(expected: string): void;
     toEqual(expected: unknown): void;
