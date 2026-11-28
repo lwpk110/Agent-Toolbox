@@ -173,3 +173,45 @@ networkTest('stdio SSE parser relays fragmented CRLF events and reconnects after
   expect(result.messages.every((m: any) => m.method === 'notifications/tools/list_changed')).toBe(true);
   expect(result.exitCode).toBe(0);
 });
+
+networkTest('imports Markdown via console API and searches the same real article over MCP after gateway restart', async () => {
+  const g = await gateway();
+  const post = async (route: string, body: unknown, method = 'POST') => {
+    const response = await fetch(`${g.url}${route}`, { method, headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    expect(response.ok).toBe(true);
+    return await response.json() as any;
+  };
+  await post('/api/v1/settings/visibility', { showDemo: false, showFixtures: false }, 'PUT');
+  const marker = `KB_E2E_${crypto.randomUUID().replaceAll('-', '')}`;
+  const imported = await post('/api/v1/kb/docs', {
+    filePath: 'acceptance/fresh-probe.md', sourceType: 'manual',
+    content: `# 知识库验收探针\n\nThis freshly authored article records the acceptance marker ${marker}.`,
+  });
+  const doc = imported.data.docs.find((item: any) => item.filePath === 'docs/acceptance/fresh-probe.md');
+  expect(doc).toMatchObject({ origin: 'real', sourceType: 'manual' });
+  const search = async (query: string) => {
+    const response = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: query, method: 'tools/call', params: {
+      name: 'toolbox__search_knowledge', arguments: { query },
+    } })).text);
+    expect(response.error).toBeUndefined();
+    return JSON.parse(response.result.content[0].text);
+  };
+  const assertHit = (result: any) => {
+    const hit = result.docs.find((item: any) => item.docId === doc.id);
+    expect(hit?.filePath).toBe(doc.filePath);
+    expect(hit?.excerpt).toContain(marker);
+  };
+  assertHit(await search(marker));
+  assertHit((await post('/api/v1/kb/search', { query: marker })).data);
+  for (const query of [`UNRELATED_${crypto.randomUUID().replaceAll('-', '')}`, 'MCP']) {
+    expect(await search(query)).toMatchObject({ docs: [], memories: [], routing: [] });
+    expect((await post('/api/v1/kb/search', { query })).data).toMatchObject({ docs: [], memories: [], routing: [] });
+  }
+  await stop(g.child);
+  await g.start();
+  const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
+  expect(state.data.visibility.showDemo).toBe(false);
+  expect(state.data.docs.find((item: any) => item.id === doc.id)).toMatchObject({ origin: 'real', content: doc.content });
+  expect(state.data.auditLogs.find((item: any) => item.requestPayload.id === marker)).toMatchObject({ host: 'Codex CLI', origin: 'real', outcome: 'ok' });
+  assertHit(await search(marker));
+}, 20000);

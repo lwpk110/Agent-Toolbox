@@ -148,3 +148,61 @@ test('preserves existing configuration during stdio seed migration and respects 
   expect(restarted.getSnapshot().servers.some(s => s.id === 'fixture')).toBe(false);
   expect(restarted.getSnapshot().hosts.find(h => h.id === 'codex')?.configSnippet).toContain('serve-stdio.ts');
 });
+
+test('real Markdown search through MCP survives persistence with demo data hidden', async () => {
+  const { store, handle } = setup();
+  store.setVisibility({ showDemo: false, showFixtures: false });
+  const marker = `KB_E2E_${crypto.randomUUID().replaceAll('-', '')}`;
+  const doc = store.addKnowledgeDoc('acceptance/knowledge-probe.md', `# 知识库验收探针\n\n现场导入的 Markdown 正文：${marker}`, 'upload');
+  expect(doc.origin).toBe('real');
+  expect(store.getSnapshot().docs.find(item => item.id === doc.id)?.content).toContain(marker);
+  const search = async (handler: ReturnType<typeof createMcpHandler>, query: string) => {
+    const response = await handler({ jsonrpc: '2.0', id: query, method: 'tools/call', params: {
+      name: 'toolbox__search_knowledge', arguments: { query },
+    } }, { hostName: 'Codex CLI' });
+    expect(response.error).toBeUndefined();
+    return JSON.parse(response.result.content[0].text);
+  };
+  const assertHit = (result: any) => {
+    expect(result.docs.map((hit: any) => hit.docId)).toContain(doc.id);
+    expect(result.docs.find((hit: any) => hit.docId === doc.id).filePath).toBe(doc.filePath);
+    expect(result.docs.find((hit: any) => hit.docId === doc.id).excerpt).toContain(marker);
+  };
+  assertHit(await search(handle, marker));
+  expect(await search(handle, `UNRELATED_${crypto.randomUUID().replaceAll('-', '')}`)).toMatchObject({ docs: [], memories: [], routing: [] });
+  // A query known to match seeds must also stay empty when demo data is hidden.
+  expect(await search(handle, 'MCP')).toMatchObject({ docs: [], memories: [], routing: [] });
+  expect(store.getSnapshot().auditLogs.find(event => event.requestPayload.id === marker)).toMatchObject({ host: 'Codex CLI', origin: 'real', outcome: 'ok' });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const dir = dirs[dirs.length - 1];
+  const restarted = new GatewayStore({ dataFile: path.join(dir, 'state.json'), lockFile: path.join(dir, 'lock.json') });
+  expect(restarted.getVisibility()).toEqual({ showDemo: false, showFixtures: false });
+  expect(restarted.getSnapshot().docs.find(item => item.id === doc.id)).toMatchObject({ origin: 'real', sourceType: 'upload', content: doc.content });
+  assertHit(await search(createMcpHandler(restarted), marker));
+});
+
+test('search applies independent demo and fixture visibility to documents, memories and recommendations', async () => {
+  const { store } = setup();
+  const visible = store.searchKnowledge('MCP');
+  expect(visible.docs.length).toBeGreaterThan(0);
+  expect(visible.memories.length).toBeGreaterThan(0);
+  expect(visible.routing.length).toBeGreaterThan(0);
+  store.setVisibility({ showDemo: false, showFixtures: true });
+  expect(store.searchKnowledge('MCP')).toMatchObject({ docs: [], memories: [], routing: [] });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  const dir = dirs[dirs.length - 1];
+  const dataFile = path.join(dir, 'state.json');
+  const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+  // Load fixture-origin records through the normal persistence loader.
+  for (const collection of [saved.docs, saved.memories, saved.skills]) {
+    for (const record of collection) { record.origin = 'fixture'; record.id = `fixture-${record.id}`; }
+  }
+  fs.writeFileSync(dataFile, JSON.stringify(saved));
+  const fixtures = new GatewayStore({ dataFile, lockFile: path.join(dir, 'lock.json') });
+  const shown = fixtures.searchKnowledge('MCP');
+  expect(shown.docs.length).toBeGreaterThan(0);
+  expect(shown.memories.length).toBeGreaterThan(0);
+  expect(shown.routing.length).toBeGreaterThan(0);
+  fixtures.setVisibility({ showDemo: true, showFixtures: false });
+  expect(fixtures.searchKnowledge('MCP')).toMatchObject({ docs: [], memories: [], routing: [] });
+});
