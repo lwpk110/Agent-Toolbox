@@ -6,7 +6,7 @@
 
 ## 背景与问题
 
-[ADR-004](./004-schema-integrity.md) 要求在握手拉清单和 `tools/call` 前校验 SHA-256 指纹，不一致则隔离并返回 `-32001`，不得转发到下游。仓库后来并存两条 MCP 路径：`/api/mcp/messages`（及 stdio 桥）走指纹锁；`/api/mcp` 的 Streamable HTTP 路径经由另一套下游连接池，一度绕过锁校验。对跨 Agent 网关而言，宿主选哪条 URL 不应改变安全保证。
+[ADR-004](./004-schema-integrity.md) 要求在握手拉清单和 `tools/call` 前校验 SHA-256 指纹，不一致则隔离并返回 `-32001`，不得转发到下游。仓库后来并存两条 MCP 路径：`/api/mcp/messages`（及 stdio 桥）走指纹锁；`/api/mcp` 的 Streamable HTTP 路径经由另一套下游连接池，一度绕过锁校验。对跨 Agent 网关而言，宿主选哪条 URL 不应改变安全保证。另外，当前 `/api/mcp` 会把 Codex 收成 `codex`，`/api/mcp/messages` 使用的是 `Codex CLI`；若不在统一时约定同一套宿主标识，Skill 挂载范围、审计记录和权限档位会按入口错位。
 
 ## 备选方案对比
 
@@ -19,5 +19,6 @@
 ## 决策与工程后果
 
 - `/api/mcp`、`/api/mcp/messages` 与 stdio 桥必须经过同一套 Schema 锁、Quarantine 与审计；任一入口在指纹不匹配时都不得转发。
+- 同一宿主在所有入口上必须使用相同的稳定标识。规范名沿用 messages 路径与控制台已有的显示名（例如 Codex 为 `Codex CLI`，而不是 `codex`）；其它入口若收到别名，应在入站时映射到该规范名，不得因 URL 不同而写成两套名字。
 - 统一工作可与 Skill、知识库并行，但不得被其它功能长期搁置，因为这是安全缺口而不是新功能。
-- 回归须在两条 HTTP 路径和 stdio 入口上同时覆盖隔离拦截与正常转发。
+- 回归须在两条 HTTP 路径和 stdio 入口上同时覆盖隔离拦截与正常转发，并断言同一宿主经不同入口写入的挂载记录与审计宿主名一致。
