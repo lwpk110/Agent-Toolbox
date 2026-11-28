@@ -120,16 +120,24 @@ export function createMcpHandler(store: GatewayStore) {
         case 'tools/list': await store.refreshMcpTools(); result = { tools: store.getMcpTools(hostName) }; break;
         case 'tools/call': {
           if (typeof params.name !== 'string' || (params.arguments !== undefined && !isObject(params.arguments))) throw new RpcError(-32602, 'Invalid tools/call params');
-          const args = params.arguments || {};
-          const matchingSkill = store.getSnapshot().skills.find(skill => skill.attachedTools.some(tool => tool.name === params.name));
-          if (!params.name.startsWith('toolbox__') && !matchingSkill) await store.validateMcpTool(params.name);
-          const definition = store.getMcpTool(params.name, hostName);
+          let name = params.name;
+          let args = params.arguments || {};
+          if (name === 'toolbox__call_tool') {
+            const innerName = String(args.toolName || args.name || '').trim();
+            const innerArgs = isObject(args.arguments) ? args.arguments : {};
+            if (!innerName || innerName === 'toolbox__call_tool') throw new RpcError(-32602, 'Valid target toolName is required for toolbox__call_tool.');
+            name = innerName;
+            args = innerArgs;
+          }
+          const matchingSkill = store.getSnapshot().skills.find(skill => skill.attachedTools.some(tool => tool.name === name));
+          if (!name.startsWith('toolbox__') && !matchingSkill) await store.validateMcpTool(name);
+          const definition = store.getMcpTool(name, hostName);
           const schema = definition.inputSchema as any;
           validateArguments(args, schema);
           const skillTool = Boolean(matchingSkill);
-          const actual: any = params.name.startsWith('toolbox__') ? executeMeta(store, params.name, args, hostName) : skillTool
-            ? await executeSkillTool(store, params.name, args, hostName)
-            : await store.callDownstream(params.name, args);
+          const actual: any = name.startsWith('toolbox__') ? executeMeta(store, name, args, hostName) : skillTool
+            ? await executeSkillTool(store, name, args, hostName)
+            : await store.callDownstream(name, args);
           result = { content: [{ type: 'text', text: store.redactSensitiveText(typeof actual === 'string' ? actual : JSON.stringify(actual)) }], ...(actual?.isError ? { isError: true } : {}) };
           break;
         }

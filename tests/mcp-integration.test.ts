@@ -114,9 +114,14 @@ networkTest('codex host aliases are recorded under the canonical Codex CLI name'
     params: { name: 'fixture__echo', arguments: { text: 'canonical-message-host' } },
   }, 'codex')).text);
   expect(JSON.parse(messageAlias.result.content[0].text).content[0].text).toBe('canonical-message-host');
+  const imported = await fetch(`${g.url}/api/v1/skills/import-directory`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ relativeDir: 'runtime-probe' }),
+  });
+  expect(imported.ok).toBe(true);
   const mount = JSON.parse((await g.rpc({
     jsonrpc: '2.0', id: 'alias-mount', method: 'tools/call',
-    params: { name: 'toolbox__load_skill', arguments: { skillId: 'security-owasp-auditor' } },
+    params: { name: 'toolbox__load_skill', arguments: { skillId: 'runtime-probe' } },
   }, 'codex')).text);
   expect(mount.error).toBeUndefined();
   const outputFile = path.join(g.dir, 'stdio-alias.json');
@@ -133,7 +138,7 @@ networkTest('codex host aliases are recorded under the canonical Codex CLI name'
   expect(stdio.exitCode).toBe(0);
   const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
   expect(state.data.auditLogs.filter((event: any) => ['alias-call', 'message-alias-call', 'alias-mount', 'echo'].includes(event.requestPayload.id)).every((event: any) => event.host === 'Codex CLI')).toBe(true);
-  expect(state.data.skills.find((skill: any) => skill.id === 'security-owasp-auditor').mountedBy).toBe('Codex CLI');
+  expect(state.data.skills.find((skill: any) => skill.id === 'runtime-probe').mountedBy).toBe('Codex CLI');
 });
 
 networkTest('HTTP forwards real downstream, persists tools and audit across restart, and fails closed after disconnection', async () => {

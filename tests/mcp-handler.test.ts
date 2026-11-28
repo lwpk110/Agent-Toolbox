@@ -45,7 +45,10 @@ test('lists real schemas and implements audited gateway meta tools without sandb
   const { store, handle } = setup();
   store.executeRpc = () => { throw new Error('sandbox must not be called'); };
   const list = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-  expect(list.result.tools.filter((t: any) => t.name.startsWith('toolbox__')).length).toBe(6);
+  const meta = list.result.tools.filter((t: any) => t.name.startsWith('toolbox__')).map((t: any) => t.name);
+  expect(meta).toContain('toolbox__call_tool');
+  expect(meta).toContain('toolbox__remember');
+  expect(meta.length).toBe(8);
   for (const tool of list.result.tools) {
     expect(typeof tool.name).toBe('string');
     expect(tool.inputSchema.type).toBe('object');
