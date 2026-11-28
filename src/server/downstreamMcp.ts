@@ -8,7 +8,7 @@ export interface DownstreamTool {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
-  annotations?: { readOnlyHint?: boolean };
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean };
 }
 
 class StdioSession {

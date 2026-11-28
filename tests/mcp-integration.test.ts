@@ -48,7 +48,7 @@ afterEach(async () => {
   for (const child of children.splice(0)) await stop(child);
   for (const dir of dirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
-async function gateway() {
+async function gateway(extraEnv: Record<string, string> = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-integration-'));
   dirs.push(dir);
   const number = await port();
@@ -57,7 +57,7 @@ async function gateway() {
   const lockFile = path.join(dir, 'toolbox.lock.json');
   let logs = '';
   async function start() {
-    const child = spawn('node', ['--import', 'tsx/esm', 'server.ts', '--production'], { env: { ...process.env, PORT: String(number), TOOLBOX_MCP_TOKEN: token, TOOLBOX_DATA_FILE: dataFile, TOOLBOX_LOCK_FILE: lockFile }, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn('node', ['--import', 'tsx/esm', 'server.ts', '--production'], { env: { ...process.env, PORT: String(number), TOOLBOX_MCP_TOKEN: token, TOOLBOX_DATA_FILE: dataFile, TOOLBOX_LOCK_FILE: lockFile, TOOLBOX_DEMO_DATA: 'off', ...extraEnv }, stdio: ['ignore', 'pipe', 'pipe'] });
     children.push(child);
     child.stdout?.on('data', b => { logs += String(b); });
     child.stderr?.on('data', b => { logs += String(b); });
@@ -95,6 +95,144 @@ networkTest('all MCP entries reject bad credentials and non-local browser author
       expect(response.status === 401 || response.status === 403).toBe(true);
     }
   }
+});
+
+async function addHitlProbe(g: Awaited<ReturnType<typeof gateway>>, marker: string) {
+  const added = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'hitl-probe', protocol: 'stdio', commandOrUrl: 'node',
+      args: ['--import', 'tsx/esm', path.resolve('tests/fixtures/hitl-probe-mcp.ts')],
+      cwd: process.cwd(), env: { HITL_MARKER_FILE: marker }, defaultMode: 'pinned',
+    }),
+  });
+  expect(added.ok).toBe(true);
+  const scoped = await fetch(`${g.url}/api/v1/hosts/codex/scope`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: 'full' }),
+  });
+  expect(scoped.ok).toBe(true);
+}
+
+async function waitForHitlTicket(url: string, toolName: string, argsNeedle?: string, timeoutMs = 3000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const state: any = await (await fetch(`${url}/api/v1/state`)).json();
+    const ticket = (state.data.pendingApprovals || []).find((item: any) =>
+      item.toolName === toolName && item.status === 'pending' && (!argsNeedle || String(item.argsPreview).includes(argsNeedle)));
+    if (ticket) return ticket;
+    await delay(50);
+  }
+  throw new Error(`HITL ticket not visible for ${toolName}${argsNeedle ? ` (${argsNeedle})` : ''}`);
+}
+
+async function resolveHitl(url: string, id: string, decision: 'approve' | 'reject') {
+  const resolved = await fetch(`${url}/api/v1/hitl/${id}/resolve`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision }),
+  });
+  expect(resolved.ok).toBe(true);
+  return resolved;
+}
+
+networkTest('real HITL tools/call waits for a console decision before reaching its downstream', async () => {
+  const g = await gateway();
+  const marker = path.join(g.dir, 'downstream-side-effect.txt');
+  await addHitlProbe(g, marker);
+  const callPromise = g.rpc({
+    jsonrpc: '2.0', id: 'held-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'must-not-run-before-approval' } },
+  }, 'Codex CLI');
+  const ticket = await waitForHitlTicket(g.url, 'hitl_probe__write_marker', 'must-not-run-before-approval');
+  const stillWaiting = await Promise.race([callPromise.then(() => false), delay(0).then(() => true)]);
+  expect(stillWaiting).toBe(true);
+  expect(fs.existsSync(marker)).toBe(false);
+  expect(ticket.argsPreview).toContain('must-not-run-before-approval');
+  await resolveHitl(g.url, ticket.id, 'reject');
+  const response = JSON.parse((await callPromise).text);
+  expect(response.error.code).toBe(-32002);
+  expect(fs.existsSync(marker)).toBe(false);
+});
+
+networkTest('console approval forwards the held HITL call to the real downstream', async () => {
+  const g = await gateway();
+  const marker = path.join(g.dir, 'downstream-side-effect.txt');
+  await addHitlProbe(g, marker);
+  const callPromise = g.rpc({
+    jsonrpc: '2.0', id: 'approved-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'approved-value' } },
+  }, 'Codex CLI');
+  const ticket = await waitForHitlTicket(g.url, 'hitl_probe__write_marker', 'approved-value');
+  expect(fs.existsSync(marker)).toBe(false);
+  await resolveHitl(g.url, ticket.id, 'approve');
+  const response = JSON.parse((await callPromise).text);
+  expect(response.result.content[0].text).toContain('wrote:approved-value');
+  expect(fs.readFileSync(marker, 'utf8')).toBe('approved-value');
+});
+
+networkTest('HITL timeout returns -32002 and never reaches the downstream', async () => {
+  const g = await gateway({ TOOLBOX_HITL_TIMEOUT_MS: '800' });
+  const marker = path.join(g.dir, 'downstream-side-effect.txt');
+  await addHitlProbe(g, marker);
+  const callPromise = g.rpc({
+    jsonrpc: '2.0', id: 'timed-out-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'must-not-run-on-timeout' } },
+  }, 'Codex CLI');
+  await waitForHitlTicket(g.url, 'hitl_probe__write_marker', 'must-not-run-on-timeout');
+  const response = JSON.parse((await callPromise).text);
+  expect(response.error.code).toBe(-32002);
+  expect(fs.existsSync(marker)).toBe(false);
+}, 15_000);
+
+networkTest('a mismatched or already-resolved HITL ticket cannot release another held call', async () => {
+  const g = await gateway();
+  const marker = path.join(g.dir, 'downstream-side-effect.txt');
+  await addHitlProbe(g, marker);
+  const firstCall = g.rpc({
+    jsonrpc: '2.0', id: 'first-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'first-value' } },
+  }, 'Codex CLI');
+  const secondCall = g.rpc({
+    jsonrpc: '2.0', id: 'second-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'second-value' } },
+  }, 'Codex CLI');
+  const firstTicket = await waitForHitlTicket(g.url, 'hitl_probe__write_marker', 'first-value');
+  const secondTicket = await waitForHitlTicket(g.url, 'hitl_probe__write_marker', 'second-value');
+  expect(firstTicket.id === secondTicket.id).toBe(false);
+  const mismatched = await fetch(`${g.url}/api/v1/hitl/${firstTicket.id}/resolve`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }),
+  });
+  expect(mismatched.ok).toBe(true);
+  const firstResponse = JSON.parse((await firstCall).text);
+  expect(firstResponse.result.content[0].text).toContain('wrote:first-value');
+  expect(fs.readFileSync(marker, 'utf8')).toBe('first-value');
+  const secondStillWaiting = await Promise.race([secondCall.then(() => false), delay(50).then(() => true)]);
+  expect(secondStillWaiting).toBe(true);
+  const replay = await fetch(`${g.url}/api/v1/hitl/${firstTicket.id}/resolve`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }),
+  });
+  expect(replay.status).toBe(404);
+  expect(fs.readFileSync(marker, 'utf8')).toBe('first-value');
+  await resolveHitl(g.url, secondTicket.id, 'reject');
+  const secondResponse = JSON.parse((await secondCall).text);
+  expect(secondResponse.error.code).toBe(-32002);
+  expect(fs.readFileSync(marker, 'utf8')).toBe('first-value');
+});
+
+networkTest('HITL-disabled tools still execute immediately without a console ticket', async () => {
+  const g = await gateway();
+  const marker = path.join(g.dir, 'downstream-side-effect.txt');
+  await addHitlProbe(g, marker);
+  const disabled = await fetch(`${g.url}/api/v1/middleware/hitl`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: false }),
+  });
+  expect(disabled.ok).toBe(true);
+  const response = JSON.parse((await g.rpc({
+    jsonrpc: '2.0', id: 'direct-call', method: 'tools/call',
+    params: { name: 'hitl_probe__write_marker', arguments: { value: 'no-ticket-needed' } },
+  }, 'Codex CLI')).text);
+  expect(response.result.content[0].text).toContain('wrote:no-ticket-needed');
+  expect(fs.readFileSync(marker, 'utf8')).toBe('no-ticket-needed');
+  const state: any = await (await fetch(`${g.url}/api/v1/state`)).json();
+  expect((state.data.pendingApprovals || []).some((item: any) => item.toolName === 'hitl_probe__write_marker')).toBe(false);
 });
 
 networkTest('/api/mcp quarantines a real downstream after its schema changes', async () => {

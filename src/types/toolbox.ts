@@ -267,6 +267,7 @@ export interface HitlApproval {
   argsPreview: string;
   createdAt: string;
   status: 'pending' | 'approved' | 'rejected';
+  sessionId?: string;
 }
 
 export interface AuditRpcEvent {
