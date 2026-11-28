@@ -183,7 +183,7 @@ networkTest('push publishes manifest and sync lock and pull applies the remote J
 });
 
 networkTest('sync rejects metadata and unallowed private API bases before requesting GitHub', async () => {
-  for (const options of [{ baseUrl: 'http://169.254.169.254', allowPrivate: true }, { baseUrl: 'https://metadata.google.internal', allowPrivate: true }, { allowPrivate: false }]) {
+  for (const options of [{ baseUrl: 'http://169.254.169.254', allowPrivate: true }, { baseUrl: 'https://metadata.google.internal', allowPrivate: true }, { baseUrl: 'https://[fd00:ec2::254]', allowPrivate: true }, { allowPrivate: false }]) {
     const gateway = await startGateway(options);
     await fetch(`${gateway.url}/api/v1/settings/visibility`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ showDemo: false }) });
     await fetch(`${gateway.url}/api/v1/vault/GITHUB_SYNC_PAT`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: crypto.randomUUID(), serviceName: 'github-sync' }) });

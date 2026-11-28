@@ -688,6 +688,35 @@ networkTest('console update and import reject unsafe remote addresses without ch
   expect(state.data.servers.find((server: any) => server.id === 'safe-command').commandOrUrl).toBe('node');
 });
 
+networkTest('explicit allow cannot open AWS IMDS IPv6 metadata addresses', async () => {
+  const g = await gateway();
+  const added = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'safe-command', protocol: 'stdio', commandOrUrl: 'node', connectOnStart: false, defaultMode: 'lazy' }),
+  });
+  expect(added.ok).toBe(true);
+  for (const commandOrUrl of ['https://[fd00:ec2::254]/latest/meta-data', 'https://[FD00:0EC2:0:0:0:0:0:254]/mcp', 'http://[fd00:ec2::254]/']) {
+    const created = await fetch(`${g.url}/api/v1/servers`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'imds-v6', protocol: 'http', commandOrUrl, allowPrivateNetwork: true, defaultMode: 'pinned' }),
+    });
+    expect(created.status).toBe(400);
+    const patched = await fetch(`${g.url}/api/v1/servers/safe-command`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ protocol: 'http', commandOrUrl, allowPrivateNetwork: true }),
+    });
+    expect(patched.status).toBe(400);
+    const imported = await fetch(`${g.url}/api/v1/servers/import-json`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rawJson: JSON.stringify({ mcpServers: { 'imds-v6': { url: commandOrUrl, allowPrivateNetwork: true } } }) }),
+    });
+    expect(imported.status).toBe(400);
+  }
+  const state = await (await fetch(`${g.url}/api/v1/state`)).json() as any;
+  expect(state.data.servers.find((server: any) => server.id === 'safe-command').commandOrUrl).toBe('node');
+  expect(state.data.servers.some((server: any) => server.id === 'imds-v6')).toBe(false);
+});
+
 networkTest('explicitly allowed HTTP and SSE downstreams list and call real tools; redirects cannot reach other private origins', async () => {
   const http = await import('node:http');
   let forbiddenHits = 0;

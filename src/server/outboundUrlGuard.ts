@@ -5,6 +5,21 @@ import https from 'node:https';
 
 export interface OutboundPolicy { allowPrivateNetwork?: boolean }
 const denied = () => new Error('Outbound URL rejected: metadata, link-local, unsafe address or protocol, or private network without explicit allow.');
+function ipv6Hextets(address: string): string[] | undefined {
+  const lower = address.toLowerCase();
+  if (isIP(lower) !== 6) return;
+  const halves = lower.split('::');
+  if (halves.length > 2) return;
+  const parse = (part: string) => (part ? part.split(':') : []);
+  const head = parse(halves[0]);
+  const tail = halves.length === 2 ? parse(halves[1]) : [];
+  if ([...head, ...tail].some(group => group.includes('.'))) return;
+  const fill = 8 - head.length - tail.length;
+  if (fill < 0 || (halves.length === 1 && fill !== 0)) return;
+  const groups = halves.length === 2 ? [...head, ...Array(fill).fill('0'), ...tail] : head;
+  if (groups.length !== 8 || groups.some(group => !/^[0-9a-f]{1,4}$/.test(group))) return;
+  return groups.map(group => group.padStart(4, '0'));
+}
 function addressKind(address: string): 'public' | 'private' | 'denied' {
   if (isIP(address) === 4) {
     const [a, b] = address.split('.').map(Number);
@@ -18,10 +33,12 @@ function addressKind(address: string): 'public' | 'private' | 'denied' {
     const mapped = lower.match(/^::ffff:([0-9.]+)$/) || lower.match(/^0:0:0:0:0:ffff:([0-9.]+)$/);
     if (mapped) return addressKind(mapped[1]);
     if (/^::ffff:/i.test(lower) || /^0:0:0:0:0:ffff:/i.test(lower)) return 'denied';
+    const hextets = ipv6Hextets(lower);
+    // AWS IMDS IPv6 lives in ULA space (fd00:ec2::/32) and must stay denied even with an explicit private allow.
+    if (hextets && hextets[0] === 'fd00' && hextets[1] === '0ec2') return 'denied';
     if (/^f[cd]/i.test(lower)) return 'private';
-    const hextets = lower.split(':');
-    // Teredo 2001:0000::/32 and 6to4 2002::/16, not all of 2001::/16.
-    if (hextets[0] === '2002' || (hextets[0] === '2001' && (!hextets[1] || hextets[1] === '0' || hextets[1] === '0000' || hextets[1] === 'db8'))) return 'denied';
+    // Teredo 2001:0000::/32, documentation 2001:db8::/32, and 6to4 2002::/16 — not all of 2001::/16.
+    if (hextets && (hextets[0] === '2002' || (hextets[0] === '2001' && (hextets[1] === '0000' || hextets[1] === '0db8')))) return 'denied';
     if (/^fe80:/i.test(lower) || /^ff/i.test(lower) || lower === '::' || !/^[23]/.test(lower)) return 'denied';
     return 'public';
   }
