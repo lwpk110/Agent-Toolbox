@@ -85,7 +85,7 @@ function validateArguments(value: unknown, schema: any, path = 'arguments'): voi
 }
 
 export function createMcpHandler(store: GatewayStore) {
-  return async function handle(msg: unknown, context: { hostName?: string } = {}): Promise<any> {
+  return async function handle(msg: unknown, context: { hostName?: string; sessionId?: string } = {}): Promise<any> {
     if (Array.isArray(msg)) {
       if (!msg.length) return rpcError(null, -32600, 'Invalid Request');
       const results = [];
@@ -134,6 +134,15 @@ export function createMcpHandler(store: GatewayStore) {
           const definition = store.getMcpTool(name, hostName);
           const schema = definition.inputSchema as any;
           validateArguments(args, schema);
+          if (!name.startsWith('toolbox__') && store.requiresHitlApproval(definition)) {
+            const approval = store.createHitlHold({ toolName: name, args, host: hostName, sessionId: context.sessionId });
+            const decision = await store.awaitHitlDecision(approval);
+            if (decision !== 'approve') {
+              throw new RpcError(-32002, decision === 'timeout'
+                ? 'HITL approval timed out before execution'
+                : 'Operation rejected by HITL human approval gate');
+            }
+          }
           const skillTool = Boolean(matchingSkill);
           const actual: any = name.startsWith('toolbox__') ? executeMeta(store, name, args, hostName) : skillTool
             ? await executeSkillTool(store, name, args, hostName)

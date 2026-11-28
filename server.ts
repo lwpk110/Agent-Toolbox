@@ -1103,7 +1103,7 @@ app.post('/api/mcp', async (req, res) => {
     ? incomingSession.trim()
     : crypto.randomUUID();
   const hostName = resolveMcpRequestHost(req, mcpClients.get(sessionId));
-  const response = await handleMcpMessage(req.body, { hostName });
+  const response = await handleMcpMessage(req.body, { hostName, sessionId });
   rememberMcpSession(req.body, response, sessionId, hostName);
   res.setHeader('Mcp-Session-Id', sessionId);
   if (response === null) res.status(202).end();
@@ -1119,9 +1119,9 @@ app.get('/api/mcp/sse', (req, res) => {
 });
 
 app.post(['/api/mcp/messages', '/api/mcp/sse'], async (req, res) => {
-  const sessionId = req.get('mcp-session-id');
+  const sessionId = req.get('mcp-session-id') || undefined;
   const hostName = resolveMcpRequestHost(req, sessionId ? mcpClients.get(sessionId) : undefined);
-  const response = await handleMcpMessage(req.body, { hostName });
+  const response = await handleMcpMessage(req.body, { hostName, sessionId });
   const initializedSessionId = crypto.randomUUID();
   if (rememberMcpSession(req.body, response, initializedSessionId, hostName)) {
     res.setHeader('mcp-session-id', initializedSessionId);

@@ -1383,6 +1383,11 @@ export class GatewayStore {
   private syncedManifestJson: string | undefined;
 
   private pendingApprovals: HitlApproval[] = [];
+  private hitlWaiters = new Map<string, {
+    resolve: (decision: 'approve' | 'reject' | 'timeout') => void;
+    binding: { toolName: string; argsPreview: string; host: string; sessionId?: string };
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private auditLogs: AuditRpcEvent[] = [];
   private visibility: VisibilitySettings = {
     showDemo: process.env.TOOLBOX_DEMO_DATA === 'on',
@@ -3014,9 +3019,75 @@ export class GatewayStore {
     }
   }
 
+  public hitlTimeoutMs(): number {
+    const raw = Number(process.env.TOOLBOX_HITL_TIMEOUT_MS);
+    return Number.isFinite(raw) && raw > 0 ? raw : 300_000;
+  }
+
+  public requiresHitlApproval(tool: unknown): boolean {
+    return Boolean(tool && typeof tool === 'object' && 'hitl' in tool && (tool as { hitl?: boolean }).hitl && this.isMiddlewareEnabled('hitl'));
+  }
+
+  public createHitlHold(params: { toolName: string; args: Record<string, unknown>; host: string; sessionId?: string }): HitlApproval {
+    const approval: HitlApproval = {
+      id: `apr_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
+      host: params.host,
+      toolName: params.toolName,
+      argsPreview: this.redactSensitiveText(JSON.stringify(params.args)),
+      createdAt: nowTimeStr(),
+      status: 'pending',
+      sessionId: params.sessionId,
+    };
+    this.pendingApprovals.unshift(approval);
+    this.emitEvent('hitl.pending', approval);
+    return approval;
+  }
+
+  public awaitHitlDecision(approval: HitlApproval): Promise<'approve' | 'reject' | 'timeout'> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        const item = this.pendingApprovals.find(entry => entry.id === approval.id);
+        if (item && item.status === 'pending') item.status = 'rejected';
+        this.hitlWaiters.delete(approval.id);
+        this.emitEvent('hitl.resolved', { approvalId: approval.id, decision: 'timeout' });
+        resolve('timeout');
+      }, this.hitlTimeoutMs());
+      this.hitlWaiters.set(approval.id, {
+        resolve: decision => {
+          clearTimeout(timer);
+          resolve(decision);
+        },
+        binding: {
+          toolName: approval.toolName,
+          argsPreview: approval.argsPreview,
+          host: approval.host,
+          sessionId: approval.sessionId,
+        },
+        timer,
+      });
+    });
+  }
+
   public resolveHitlApproval(approvalId: string, decision: 'approve' | 'reject'): HitlApproval | null {
     const item = this.pendingApprovals.find((a) => a.id === approvalId);
     if (!item || item.status !== 'pending') return null;
+    const waiter = this.hitlWaiters.get(approvalId);
+    if (waiter) {
+      if (
+        waiter.binding.toolName !== item.toolName
+        || waiter.binding.argsPreview !== item.argsPreview
+        || waiter.binding.host !== item.host
+        || (waiter.binding.sessionId || item.sessionId) && waiter.binding.sessionId !== item.sessionId
+      ) {
+        return null;
+      }
+      item.status = decision === 'approve' ? 'approved' : 'rejected';
+      this.hitlWaiters.delete(approvalId);
+      waiter.resolve(decision);
+      this.emitEvent('hitl.resolved', { approvalId, decision });
+      return item;
+    }
+
     item.status = decision === 'approve' ? 'approved' : 'rejected';
 
     const event: AuditRpcEvent = {
@@ -3086,7 +3157,7 @@ export class GatewayStore {
       return {
         origin: server.origin || 'real',
         name, remoteName: tool.name, description: tool.description || '', inputSchema: tool.inputSchema,
-        serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl || false,
+        serverId: server.id, mode: existing?.mode || 'pinned', hitl: existing?.hitl ?? Boolean(tool.annotations?.destructiveHint),
         readOnly: tool.annotations?.readOnlyHint === true, annotations: tool.annotations,
         estimatedTokens: existing?.estimatedTokens || 100,
         fingerprint: toolFingerprint(tool), lockedFingerprint: locked?.tools[tool.name] || '',
@@ -3177,7 +3248,6 @@ export class GatewayStore {
     const host = this.hosts.find(h => h.name === hostName || h.id === hostName);
     if (server.state === 'quarantined' && server.protocol === 'stdio' && server.connectOnStart !== false) this.throwQuarantineError(server, name);
     if (host && host.scope !== 'full' && !tool.readOnly) throw new RpcError(-32003, 'Host scope forbids this tool');
-    if (tool.hitl && this.isMiddlewareEnabled('hitl')) throw new RpcError(-32002, 'Tool requires human approval before execution');
     if (server.secretRef && this.isMiddlewareEnabled('vault') && !this.getVaultEntriesWithRefs().some(v => `vault://${v.key}` === server.secretRef && v.configured)) throw new RpcError(-32004, 'Required vault secret missing');
     const budget = this.middleware.find(m => m.id === 'budget');
     if (budget?.enabled && this.getMetrics().currentExposureTokens > (budget.config?.maxTokensPerTurn ?? 4000)) throw new RpcError(-32005, 'Token budget exceeded');
