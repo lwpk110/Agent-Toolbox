@@ -74,6 +74,7 @@ interface GatewayViewProps {
     secretRef?: string;
     initialToolName?: string;
     initialToolDesc?: string;
+    allowPrivateNetwork?: boolean;
   }) => Promise<void>;
   onImportMcpJson: (
     rawJson: string,
@@ -89,6 +90,7 @@ interface GatewayViewProps {
       headers?: Record<string, string>;
       enabled?: boolean;
       secretRef?: string;
+      allowPrivateNetwork?: boolean;
     }
   ) => Promise<void>;
   onDeleteServer: (serverId: string, serverName: string) => Promise<void>;
@@ -139,6 +141,7 @@ export function GatewayView({
   const [srvMode, setSrvMode] = useState<ExposureMode>('lazy');
   const [srvSecret, setSrvSecret] = useState('');
   const [srvTool, setSrvTool] = useState('');
+  const [srvAllowPrivate, setSrvAllowPrivate] = useState(false);
   const [formErr, setFormErr] = useState('');
 
   const quarantinedServers = state.servers.filter((s) => s.state === 'quarantined');
@@ -178,6 +181,7 @@ export function GatewayView({
     setSrvMode('lazy');
     setSrvSecret('');
     setSrvTool('');
+    setSrvAllowPrivate(false);
     setAddOpen(true);
   };
 
@@ -190,6 +194,7 @@ export function GatewayView({
     setSrvEnvText(formatKeyValLines(s.env));
     setSrvHeadersText(formatKeyValLines(s.headers));
     setSrvSecret(s.secretRef || '');
+    setSrvAllowPrivate(s.allowPrivateNetwork === true);
   };
 
   const handleAddSubmit = async () => {
@@ -227,6 +232,7 @@ export function GatewayView({
           defaultMode: srvMode,
           secretRef: srvSecret || undefined,
           initialToolName: srvTool || undefined,
+          allowPrivateNetwork: srvProto !== 'stdio' ? srvAllowPrivate : undefined,
         });
         setExpanded((prev) => ({ ...prev, [srvName.trim().toLowerCase()]: true }));
         setAddOpen(false);
@@ -258,6 +264,7 @@ export function GatewayView({
         env: srvProto === 'stdio' ? parseKeyValLines(srvEnvText) || {} : {},
         headers: srvProto !== 'stdio' ? parseKeyValLines(srvHeadersText) || {} : {},
         secretRef: srvSecret.trim(),
+        allowPrivateNetwork: srvProto !== 'stdio' ? srvAllowPrivate : undefined,
       });
       setEditTarget(null);
     } catch (err) {
@@ -895,7 +902,7 @@ export function GatewayView({
               />
               <span className="help">
                 支持 command + args[] + env&#123;&#125; 或 url + headers&#123;&#125;。含敏感字段名的明文值会自动加密存入
-                Vault 并替换为 vault:// 引用。
+                Vault 并替换为 vault:// 引用。本机或局域网远程地址需在条目中设置 allowPrivateNetwork: true。
               </span>
             </div>
             <div className="field">
@@ -1007,6 +1014,22 @@ export function GatewayView({
                 />
               </div>
             )}
+            {srvProto !== 'stdio' && (
+              <div className="field">
+                <label htmlFor="srvAllowPrivate" style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                  <input
+                    id="srvAllowPrivate"
+                    type="checkbox"
+                    checked={srvAllowPrivate}
+                    onChange={(e) => setSrvAllowPrivate(e.target.checked)}
+                  />
+                  <span>
+                    允许连接本机或局域网地址
+                    <span className="help">公网仅支持 HTTPS。勾选后才可用 HTTP 或 HTTPS 访问环回与 LAN；云元数据和链路本地地址始终拒绝。</span>
+                  </span>
+                </label>
+              </div>
+            )}
             <div className="grid-2" style={{ gap: '12px' }}>
               <div className="field">
                 <label htmlFor="srvTool">初始工具名（可选）</label>
@@ -1113,6 +1136,22 @@ export function GatewayView({
               onChange={(e) => setSrvHeadersText(e.target.value)}
             />
           </div>
+        )}
+        {srvProto !== 'stdio' && (
+            <div className="field">
+              <label htmlFor="editAllowPrivate" style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                <input
+                  id="editAllowPrivate"
+                  type="checkbox"
+                  checked={srvAllowPrivate}
+                  onChange={(e) => setSrvAllowPrivate(e.target.checked)}
+                />
+                <span>
+                  允许连接本机或局域网地址
+                  <span className="help">公网仅支持 HTTPS。勾选后才可用 HTTP 或 HTTPS 访问环回与 LAN；云元数据和链路本地地址始终拒绝。</span>
+                </span>
+              </label>
+            </div>
         )}
         {formErr && <span className="err">{formErr}</span>}
       </ModalDialog>

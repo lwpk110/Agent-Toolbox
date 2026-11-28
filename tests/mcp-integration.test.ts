@@ -653,3 +653,78 @@ networkTest('later service with a colliding normalized prefix is isolated', asyn
   expect(JSON.parse(call.result.content[0].text).content[0].text).toBe('first-wins');
   expect(JSON.stringify(call)).not.toContain('namespace-fixture:');
 });
+
+networkTest('console rejects metadata, userinfo, public HTTP and unallowed private downstreams before connecting', async () => {
+  const g = await gateway();
+  for (const commandOrUrl of ['http://169.254.169.254/latest/meta-data', 'https://metadata.google.internal/', 'https://user:password@example.com/mcp', 'http://93.184.216.34/mcp', 'http://127.0.0.1:9/mcp', 'https://[::ffff:127.0.0.1]/mcp']) {
+    const response = await fetch(`${g.url}/api/v1/servers`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'unsafe-target', protocol: 'http', commandOrUrl, defaultMode: 'pinned' }),
+    });
+    expect(response.status).toBe(400);
+  }
+});
+
+networkTest('console update and import reject unsafe remote addresses without changing the saved endpoint', async () => {
+  const g = await gateway();
+  const added = await fetch(`${g.url}/api/v1/servers`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'safe-command', protocol: 'stdio', commandOrUrl: 'node', connectOnStart: false, defaultMode: 'lazy' }),
+  });
+  expect(added.ok).toBe(true);
+  for (const commandOrUrl of ['http://169.254.169.254/', 'http://metadata.google.internal/', 'http://169.254.1.2/', 'http://168.63.129.16/', 'http://100.100.100.200/']) {
+    const patched = await fetch(`${g.url}/api/v1/servers/safe-command`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ protocol: 'http', commandOrUrl, allowPrivateNetwork: true }),
+    });
+    expect(patched.status).toBe(400);
+    const imported = await fetch(`${g.url}/api/v1/servers/import-json`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ rawJson: JSON.stringify({ mcpServers: { unsafe: { url: commandOrUrl, allowPrivateNetwork: true } } }) }),
+    });
+    expect(imported.status).toBe(400);
+  }
+  const state = await (await fetch(`${g.url}/api/v1/state`)).json() as any;
+  expect(state.data.servers.find((server: any) => server.id === 'safe-command').commandOrUrl).toBe('node');
+});
+
+networkTest('explicitly allowed HTTP and SSE downstreams list and call real tools; redirects cannot reach other private origins', async () => {
+  const http = await import('node:http');
+  let forbiddenHits = 0;
+  const forbidden = http.createServer((_req, res) => { forbiddenHits++; res.end('{}'); });
+  await new Promise<void>(resolve => forbidden.listen(0, '127.0.0.1', resolve));
+  const forbiddenUrl = `http://127.0.0.1:${(forbidden.address() as net.AddressInfo).port}/mcp`;
+  const fixture = http.createServer(async (req, res) => {
+    if (req.url === '/redirect') { res.writeHead(307, { location: forbiddenUrl }); res.end(); return; }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (!body.id) { res.writeHead(202); res.end(); return; }
+    const result = body.method === 'initialize' ? { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'http-fixture', version: '1' } }
+      : body.method === 'tools/list' ? { tools: [{ name: 'echo', description: 'real remote echo', inputSchema: { type: 'object' }, annotations: { readOnlyHint: true } }] }
+      : body.method === 'tools/call' ? { content: [{ type: 'text', text: 'guarded-real-result' }] }
+      : {};
+    res.setHeader('content-type', req.url === '/sse' ? 'text/event-stream' : 'application/json');
+    const message = JSON.stringify({ jsonrpc: '2.0', id: body.id, result });
+    res.end(req.url === '/sse' ? `data: ${message}\n\n` : message);
+  });
+  await new Promise<void>(resolve => fixture.listen(0, '127.0.0.1', resolve));
+  try {
+    const g = await gateway();
+    const base = `http://127.0.0.1:${(fixture.address() as net.AddressInfo).port}`;
+    for (const protocol of ['http', 'sse']) {
+      const added = await fetch(`${g.url}/api/v1/servers`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: `remote-${protocol}`, protocol, commandOrUrl: `${base}/${protocol}`, allowPrivateNetwork: true, defaultMode: 'pinned' }) });
+      expect(added.ok).toBe(true);
+      const listed = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'list-remote', method: 'tools/list' })).text);
+      expect(listed.result.tools.some((tool: any) => tool.name === `remote_${protocol}__echo`)).toBe(true);
+      const called = JSON.parse((await g.rpc({ jsonrpc: '2.0', id: 'call-remote', method: 'tools/call', params: { name: `remote_${protocol}__echo`, arguments: {} } })).text);
+      expect(JSON.stringify(called)).toContain('guarded-real-result');
+    }
+    await fetch(`${g.url}/api/v1/servers`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'redirect-probe', protocol: 'http', commandOrUrl: `${base}/redirect`, allowPrivateNetwork: true, defaultMode: 'pinned' }) });
+    const ping = await (await fetch(`${g.url}/api/v1/servers/redirect-probe/ping`, { method: 'POST' })).json() as any;
+    expect(ping.syncOk).toBe(false);
+    expect(forbiddenHits).toBe(0);
+  } finally {
+    await Promise.all([new Promise<void>(r => fixture.close(() => r())), new Promise<void>(r => forbidden.close(() => r()))]);
+  }
+});

@@ -161,3 +161,11 @@ lancedb/
 *.hnsw
 audit-logs/
 ```
+
+## 出站远程 URL 守护
+
+远程 HTTP/SSE MCP 的添加、更新、导入和实际请求，以及 GitHub 同步请求，共用出站 URL 守护。公网只允许 HTTPS；环回与 LAN 必须显式允许，才可使用 HTTP 或 HTTPS。URL 中的 userinfo、云元数据、链路本地与不安全地址始终拒绝，显式允许不能覆盖这些规则。
+
+控制台添加或更新远程服务时可勾选允许本机/局域网，API 与 mcp.json 对应字段为 `allowPrivateNetwork: true`（布尔值）。已保存但没有此标志的本机服务不会自动连接。每次请求都重新解析并校验 DNS，连接使用已校验的地址，不读取环境代理；重定向逐跳校验。私网允许仅覆盖初始私网 URL 的同源跳转，跨主机或端口的私网重定向需改为直接配置目标。
+
+GitHub 同步默认使用 `https://api.github.com`。测试可用 `TOOLBOX_GITHUB_API_URL` 注入假 GitHub；本机/LAN 夹具还需显式设置 `TOOLBOX_GITHUB_ALLOW_PRIVATE=true`。同步中的每个请求和重定向沿用同一守护规则。

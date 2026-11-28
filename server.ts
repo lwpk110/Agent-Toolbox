@@ -1,3 +1,4 @@
+import { validateOutboundUrl } from './src/server/outboundUrlGuard';
 import { mcpToken } from './src/server/mcpCredentials';
 import express from 'express';
 import crypto from 'node:crypto';
@@ -420,6 +421,9 @@ app.post('/api/v1/hosts/codex/import-servers', async (req, res) => {
       skippedIds.push(srv.name);
       continue;
     }
+    if (srv.transport === 'http') {
+      try { await validateOutboundUrl(srv.url || ''); } catch { skippedIds.push(srv.name); continue; }
+    }
     const created = gatewayStore.addServer({
       name: cleanId,
       protocol: srv.transport === 'http' ? 'http' : 'stdio',
@@ -482,13 +486,19 @@ app.patch('/api/v1/middleware/:id', (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
-app.post('/api/v1/servers/import-json', (req, res) => {
+app.post('/api/v1/servers/import-json', async (req, res) => {
   const { rawJson, defaultMode } = req.body || {};
   if (typeof rawJson !== 'string' || !rawJson.trim()) {
     sendErr(res, 400, 'INVALID_JSON', '请粘贴标准 mcp.json 内容。');
     return;
   }
   const mode: ExposureMode = defaultMode === 'pinned' ? 'pinned' : 'lazy';
+  try {
+    const parsed = JSON.parse(rawJson);
+    for (const cfg of Object.values(parsed.mcpServers || parsed) as any[]) {
+      if (cfg && typeof cfg.url === 'string') await validateOutboundUrl(cfg.url, { allowPrivateNetwork: cfg.allowPrivateNetwork === true });
+    }
+  } catch (error) { sendErr(res, 400, 'MCP_JSON_IMPORT_FAILED', (error as Error).message); return; }
   const result = gatewayStore.importMcpJson(rawJson, mode);
   if (result.error) {
     sendErr(res, 400, 'MCP_JSON_IMPORT_FAILED', result.error);
@@ -501,7 +511,7 @@ app.post('/api/v1/servers/import-json', (req, res) => {
 });
 
 app.post('/api/v1/servers', async (req, res) => {
-  const { name, protocol, commandOrUrl, cwd, args, env, headers, defaultMode, secretRef, connectOnStart, initialToolName, initialToolDesc } =
+  const { name, protocol, commandOrUrl, cwd, args, env, headers, defaultMode, secretRef, connectOnStart, allowPrivateNetwork, initialToolName, initialToolDesc } =
     req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     sendErr(res, 400, 'INVALID_NAME', '请填写 MCP Server 命名空间名称。');
@@ -516,8 +526,12 @@ app.post('/api/v1/servers', async (req, res) => {
     return;
   }
   const mode: ExposureMode = defaultMode === 'pinned' ? 'pinned' : 'lazy';
+  if (protocol !== 'stdio') {
+    try { await validateOutboundUrl(commandOrUrl, { allowPrivateNetwork: allowPrivateNetwork === true }); } catch (error) { sendErr(res, 400, 'INVALID_ENDPOINT', (error as Error).message); return; }
+  }
   const result = gatewayStore.addServer({
     name,
+    allowPrivateNetwork: allowPrivateNetwork === true,
     protocol: protocol as TransportProtocol,
     commandOrUrl,
     cwd: typeof cwd === 'string' ? cwd : undefined,
@@ -540,9 +554,14 @@ app.post('/api/v1/servers', async (req, res) => {
   sendOk(res, gatewayStore.getSnapshot());
 });
 
-app.patch('/api/v1/servers/:id', (req, res) => {
-  const { protocol, commandOrUrl, cwd, args, env, headers, enabled, secretRef } = req.body || {};
+app.patch('/api/v1/servers/:id', async (req, res) => {
+  const { protocol, commandOrUrl, cwd, args, env, headers, enabled, secretRef, allowPrivateNetwork } = req.body || {};
+  const current = gatewayStore.getSnapshot().servers.find(server => server.id === req.params.id);
+  if (current && (protocol || current.protocol) !== 'stdio') {
+    try { await validateOutboundUrl(commandOrUrl || current.commandOrUrl, { allowPrivateNetwork: typeof allowPrivateNetwork === 'boolean' ? allowPrivateNetwork : current.allowPrivateNetwork }); } catch (error) { sendErr(res, 400, 'INVALID_ENDPOINT', (error as Error).message); return; }
+  }
   const result = gatewayStore.updateServer(req.params.id, {
+    allowPrivateNetwork: typeof allowPrivateNetwork === 'boolean' ? allowPrivateNetwork : undefined,
     protocol: ['stdio', 'sse', 'http'].includes(protocol) ? (protocol as TransportProtocol) : undefined,
     commandOrUrl: typeof commandOrUrl === 'string' ? commandOrUrl : undefined,
     cwd: typeof cwd === 'string' ? cwd : undefined,

@@ -1,3 +1,4 @@
+import { checkOutboundUrl, guardedFetch } from './outboundUrlGuard';
 import { buildCodexTomlBlock } from './adapters/codex';
 import crypto from 'crypto';
 import path from 'node:path';
@@ -69,23 +70,28 @@ export interface GitHubSyncRemote {
 
 class GitHubContentsRemote implements GitHubSyncRemote {
   private readonly baseUrl = (process.env.TOOLBOX_GITHUB_API_URL || 'https://api.github.com').replace(/\/$/, '');
+  private readonly allowPrivateNetwork = process.env.TOOLBOX_GITHUB_ALLOW_PRIVATE === 'true';
+
+  private fetch(url: string | URL, init: RequestInit): Promise<Response> {
+    return guardedFetch(url, init, { allowPrivateNetwork: this.allowPrivateNetwork });
+  }
 
   private async ensureBranch(repo: string, branch: string, token: string): Promise<void> {
     const headers = this.headers(token);
     const refUrl = `${this.baseUrl}/repos/${repo}/git/ref/heads/${encodeURIComponent(branch)}`;
-    const existing = await fetch(refUrl, { headers });
+    const existing = await this.fetch(refUrl, { headers });
     if (existing.ok) return;
     if (existing.status !== 404) {
       const body = await existing.json() as { message?: string };
       throw new Error(`GitHub sync failed (${existing.status}): ${body.message || 'branch lookup failed'}`);
     }
-    const repository = await fetch(`${this.baseUrl}/repos/${repo}`, { headers });
+    const repository = await this.fetch(`${this.baseUrl}/repos/${repo}`, { headers });
     const repositoryBody = await repository.json() as { default_branch?: string; message?: string };
     if (!repository.ok || !repositoryBody.default_branch) throw new Error(`GitHub sync failed (${repository.status}): ${repositoryBody.message || 'default branch unavailable'}`);
-    const baseRef = await fetch(`${this.baseUrl}/repos/${repo}/git/ref/heads/${encodeURIComponent(repositoryBody.default_branch)}`, { headers });
+    const baseRef = await this.fetch(`${this.baseUrl}/repos/${repo}/git/ref/heads/${encodeURIComponent(repositoryBody.default_branch)}`, { headers });
     const baseBody = await baseRef.json() as { object?: { sha?: string }; message?: string };
     if (!baseRef.ok || !baseBody.object?.sha) throw new Error(`GitHub sync failed (${baseRef.status}): ${baseBody.message || 'default branch head unavailable'}`);
-    const created = await fetch(`${this.baseUrl}/repos/${repo}/git/refs`, {
+    const created = await this.fetch(`${this.baseUrl}/repos/${repo}/git/refs`, {
       method: 'POST', headers, body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: baseBody.object.sha }),
     });
     if (!created.ok) {
@@ -97,7 +103,7 @@ class GitHubContentsRemote implements GitHubSyncRemote {
   async putFile(input: { repo: string; branch: string; path: string; content: string; message: string; token: string }): Promise<string> {
     await this.ensureBranch(input.repo, input.branch, input.token);
     const existing = await this.request(input, 'GET');
-    const response = await fetch(`${this.baseUrl}/repos/${input.repo}/contents/${input.path.split('/').map(encodeURIComponent).join('/')}`, {
+    const response = await this.fetch(`${this.baseUrl}/repos/${input.repo}/contents/${input.path.split('/').map(encodeURIComponent).join('/')}`, {
       method: 'PUT',
       headers: this.headers(input.token),
       body: JSON.stringify({ message: input.message, content: Buffer.from(input.content).toString('base64'), branch: input.branch, ...(existing?.sha ? { sha: existing.sha } : {}) }),
@@ -120,7 +126,7 @@ class GitHubContentsRemote implements GitHubSyncRemote {
   private async request(input: { repo: string; branch: string; path: string; token: string }, method: 'GET') {
     const url = new URL(`${this.baseUrl}/repos/${input.repo}/contents/${input.path.split('/').map(encodeURIComponent).join('/')}`);
     url.searchParams.set('ref', input.branch);
-    const response = await fetch(url, { method, headers: this.headers(input.token) });
+    const response = await this.fetch(url, { method, headers: this.headers(input.token) });
     if (response.status === 404) return undefined;
     const result = await response.json() as { sha?: string; content: string; message?: string };
     if (!response.ok) throw new Error(`GitHub sync failed (${response.status}): ${result.message || 'request failed'}`);
@@ -1948,10 +1954,14 @@ export class GatewayStore {
     headers?: Record<string, string>;
     defaultMode: ExposureMode;
     connectOnStart?: boolean;
+    allowPrivateNetwork?: boolean;
     secretRef?: string;
     initialToolName?: string;
     initialToolDesc?: string;
   }): { server?: McpServer; error?: string } {
+    if (input.protocol !== 'stdio') {
+      try { checkOutboundUrl(input.commandOrUrl, input); } catch (error) { return { error: (error as Error).message }; }
+    }
     const id = input.name.trim().toLowerCase();
     if (!/^[a-z0-9-]+$/.test(id)) {
       return { error: '命名空间仅支持小写字母、数字和连字符（例如 linear-mcp）。' };
@@ -2032,6 +2042,7 @@ export class GatewayStore {
       headers: Object.keys(safeHeaders).length ? safeHeaders : undefined,
       enabled: true,
       connectOnStart: input.connectOnStart ?? true,
+      allowPrivateNetwork: input.allowPrivateNetwork === true,
       latencyMs: Math.floor(10 + Math.random() * 22),
       state: 'ok',
       fingerprint: fp,
@@ -2140,6 +2151,7 @@ export class GatewayStore {
         name: cleanId,
         protocol,
         commandOrUrl: url || command,
+        allowPrivateNetwork: cfg.allowPrivateNetwork === true,
         cwd: typeof cfg.cwd === 'string' ? cfg.cwd : undefined,
         args,
         env,
@@ -2177,11 +2189,16 @@ export class GatewayStore {
       env?: Record<string, string>;
       headers?: Record<string, string>;
       enabled?: boolean;
+      allowPrivateNetwork?: boolean;
       secretRef?: string;
     }
   ): { server?: McpServer; error?: string } {
     const server = this.servers.find((s) => s.id === serverId);
     if (!server) return { error: '未找到指定 MCP Server。' };
+    if ((patch.protocol || server.protocol) !== 'stdio') {
+      try { checkOutboundUrl(patch.commandOrUrl || server.commandOrUrl, { allowPrivateNetwork: patch.allowPrivateNetwork ?? server.allowPrivateNetwork }); } catch (error) { return { error: (error as Error).message }; }
+    }
+    if (typeof patch.allowPrivateNetwork === 'boolean') server.allowPrivateNetwork = patch.allowPrivateNetwork;
 
     if (patch.protocol && ['stdio', 'sse', 'http'].includes(patch.protocol)) {
       server.protocol = patch.protocol;
@@ -3140,13 +3157,18 @@ export class GatewayStore {
   public async refreshMcpTools(serverId?: string) {
     this.downstream.reconcile(this.servers);
     for (const server of this.servers) {
-      if (server.state !== 'quarantined' && (server.connectOnStart === false || server.protocol !== 'stdio' || !server.enabled)) server.state = 'offline';
+      if (server.state !== 'quarantined' && (server.connectOnStart === false || !server.enabled)) server.state = 'offline';
     }
-    const active = this.servers.filter(s => (!serverId || s.id === serverId) && s.enabled && s.protocol === 'stdio' && s.connectOnStart !== false);
+    const active = this.servers.filter(s => (!serverId || s.id === serverId) && s.enabled && s.connectOnStart !== false && ['stdio', 'http', 'sse'].includes(s.protocol));
     for (const server of active) {
       try {
-        const tools = await this.downstream.list(server);
-        this.acceptDownstreamTools(server, tools);
+        if (server.protocol === 'stdio') {
+          const tools = await this.downstream.list(server);
+          this.acceptDownstreamTools(server, tools);
+        } else {
+          const synced = await this.syncRealServer(server.id);
+          if (!synced.ok) throw new Error(synced.error || 'Remote MCP sync failed');
+        }
         this.scheduleSave();
       } catch (error) {
         console.error(`[mcp] ${server.id}: ${String(error)}`);
@@ -3255,7 +3277,19 @@ export class GatewayStore {
     if (!server) throw new RpcError(-32006, 'No real downstream connected for this tool');
     if (server.origin === 'demo' || (server.origin === 'fixture' && !this.visibility.showFixtures)) throw new RpcError(-32602, 'Tool is hidden by data visibility settings');
     if (server.state === 'quarantined') this.throwQuarantineError(server, name);
-    return this.downstream.call(server, server.tools.find(tool => tool.name === name)?.remoteName || name, args);
+    const remoteName = server.tools.find(tool => tool.name === name)?.remoteName || name;
+    if (server.protocol !== 'stdio') {
+      const secrets = this.resolveServerSecrets(server);
+      if (!secrets.ok) throw new RpcError(-32004, 'Required vault secret missing');
+      try {
+        const remoteRes = await downstreamPool.callTool(server, remoteName, args, secrets.env, secrets.headers);
+        return { content: remoteRes.content, isError: remoteRes.isError };
+      } catch (error) {
+        if (error instanceof RpcError) throw error;
+        throw new RpcError(-32006, String(error));
+      }
+    }
+    return this.downstream.call(server, remoteName, args);
   }
 
   private throwQuarantineError(server: McpServer, toolName: string): never {

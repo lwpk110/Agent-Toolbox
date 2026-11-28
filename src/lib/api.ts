@@ -90,6 +90,7 @@ export const api = {
     secretRef?: string;
     initialToolName?: string;
     initialToolDesc?: string;
+    allowPrivateNetwork?: boolean;
   }) =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>('/api/v1/servers', {
       method: 'POST',
@@ -106,6 +107,7 @@ export const api = {
       headers?: Record<string, string>;
       enabled?: boolean;
       secretRef?: string;
+      allowPrivateNetwork?: boolean;
     }
   ) =>
     requestJson<{ ok: true; data: GatewayStateSnapshot }>(`/api/v1/servers/${encodeURIComponent(serverId)}`, {
