@@ -102,6 +102,7 @@ export interface McpServer {
   args?: string[];
   env?: Record<string, string>;
   headers?: Record<string, string>;
+  allowPrivateNetwork?: boolean;
   enabled: boolean;
   latencyMs: number;
   state: ServerState;

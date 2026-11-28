@@ -1,3 +1,4 @@
+import { guardedFetch } from './outboundUrlGuard';
 import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
 import type {
   McpPrompt,
@@ -271,7 +272,8 @@ class HttpMcpSession {
 
   constructor(
     private readonly url: string,
-    private readonly headers: Record<string, string>
+    private readonly headers: Record<string, string>,
+    private readonly allowPrivateNetwork = false
   ) {}
 
   public async request(
@@ -292,7 +294,7 @@ class HttpMcpSession {
         reqHeaders['Mcp-Session-Id'] = this.sessionId;
       }
 
-      const res = await fetch(this.url, {
+      const res = await guardedFetch(this.url, {
         method: 'POST',
         headers: reqHeaders,
         body: JSON.stringify({
@@ -302,7 +304,7 @@ class HttpMcpSession {
           ...(params !== undefined ? { params } : {}),
         }),
         signal: controller.signal,
-      });
+      }, { allowPrivateNetwork: this.allowPrivateNetwork });
 
       const returnedSid = res.headers.get('mcp-session-id');
       if (returnedSid) {
@@ -323,7 +325,7 @@ class HttpMcpSession {
     if (this.sessionId) {
       reqHeaders['Mcp-Session-Id'] = this.sessionId;
     }
-    await fetch(this.url, {
+    await guardedFetch(this.url, {
       method: 'POST',
       headers: reqHeaders,
       body: JSON.stringify({
@@ -331,7 +333,7 @@ class HttpMcpSession {
         method,
         ...(params !== undefined ? { params } : {}),
       }),
-    }).catch(() => {});
+    }, { allowPrivateNetwork: this.allowPrivateNetwork }).catch(() => {});
   }
 
   public async ensureInitialized(): Promise<{ serverInfo?: { name?: string; version?: string } }> {
@@ -380,12 +382,12 @@ export class DownstreamPool {
   }
 
   private getHttpSession(server: McpServer, resolvedHeaders: Record<string, string>): HttpMcpSession {
-    const signature = JSON.stringify({ url: server.commandOrUrl, headers: resolvedHeaders });
+    const signature = JSON.stringify({ url: server.commandOrUrl, headers: resolvedHeaders, allowPrivateNetwork: server.allowPrivateNetwork });
     const existing = this.httpSessions.get(server.id);
     if (existing && existing.key === signature) {
       return existing.conn;
     }
-    const conn = new HttpMcpSession(server.commandOrUrl, resolvedHeaders);
+    const conn = new HttpMcpSession(server.commandOrUrl, resolvedHeaders, server.allowPrivateNetwork === true);
     this.httpSessions.set(server.id, { key: signature, conn });
     return conn;
   }

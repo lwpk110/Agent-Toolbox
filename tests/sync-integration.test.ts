@@ -28,7 +28,7 @@ const children: ChildProcess[] = [];
 const directories: string[] = [];
 const remoteServers: http.Server[] = [];
 
-async function startGateway() {
+async function startGateway(options: { baseUrl?: string; allowPrivate?: boolean; redirect?: string } = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-integration-'));
   directories.push(directory);
   const probe = net.createServer();
@@ -39,7 +39,10 @@ async function startGateway() {
   const files = new Map<string, string>();
   const commits = new Set<string>();
   const branches = new Set(['main']);
+  let requests = 0;
   const remote = http.createServer(async (request, response) => {
+    requests++;
+    if (options.redirect) { response.writeHead(307, { location: options.redirect }).end(); return; }
     const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(Buffer.from(chunk));
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
@@ -83,7 +86,7 @@ async function startGateway() {
   await new Promise<void>((resolve) => remote.listen(remotePort, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${port}`;
   const child = spawn('node', ['--import', 'tsx/esm', 'server.ts', '--production'], {
-    env: { ...process.env, PORT: String(port), TOOLBOX_DATA_FILE: path.join(directory, 'state.json'), TOOLBOX_LOCK_FILE: path.join(directory, 'toolbox.lock.json'), TOOLBOX_DEMO_DATA: 'off', TOOLBOX_GITHUB_API_URL: `http://127.0.0.1:${remotePort}` },
+    env: { ...process.env, PORT: String(port), TOOLBOX_DATA_FILE: path.join(directory, 'state.json'), TOOLBOX_LOCK_FILE: path.join(directory, 'toolbox.lock.json'), TOOLBOX_DEMO_DATA: 'off', TOOLBOX_MCP_TOKEN: crypto.randomUUID(), TOOLBOX_GITHUB_API_URL: options.baseUrl || `http://127.0.0.1:${remotePort}`, TOOLBOX_GITHUB_ALLOW_PRIVATE: options.allowPrivate === false ? 'false' : 'true' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   children.push(child);
@@ -97,7 +100,7 @@ async function startGateway() {
     if (child.exitCode !== null) throw new Error(`Gateway exited: ${logs}`);
     await new Promise((resolve) => setTimeout(resolve, 30));
   }
-  return { url, files, commits };
+  return { url, files, commits, requests: () => requests };
 }
 
 async function freePort() {
@@ -138,7 +141,7 @@ networkTest('preflight blocks a missing visible Vault reference before any remot
   };
   await request('/api/v1/settings/visibility', 'PUT', { showDemo: false });
   await request('/api/v1/servers', 'POST', {
-    name: 'required-sync-vault', protocol: 'http', commandOrUrl: 'http://127.0.0.1:1',
+    name: 'required-sync-vault', protocol: 'http', allowPrivateNetwork: true, commandOrUrl: 'http://127.0.0.1:1',
     env: { API_TOKEN: 'vault://REQUIRED_SYNC_TOKEN' }, secretRef: 'vault://REQUIRED_SYNC_TOKEN', connectOnStart: false,
   });
   const preflight = await fetch(`${gateway.url}/api/v1/sync/preflight`).then(response => response.json()) as any;
@@ -177,4 +180,34 @@ networkTest('push publishes manifest and sync lock and pull applies the remote J
   expect(pulled.body.ok).toBe(true);
   expect(JSON.parse(pulled.body.data.preflight.manifestJson)).toEqual(JSON.parse(manifest));
   expect(JSON.parse(pulled.body.data.preflight.lockfileJson)).toEqual(JSON.parse(lock));
+});
+
+networkTest('sync rejects metadata and unallowed private API bases before requesting GitHub', async () => {
+  for (const options of [{ baseUrl: 'http://169.254.169.254', allowPrivate: true }, { baseUrl: 'https://metadata.google.internal', allowPrivate: true }, { allowPrivate: false }]) {
+    const gateway = await startGateway(options);
+    await fetch(`${gateway.url}/api/v1/settings/visibility`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ showDemo: false }) });
+    await fetch(`${gateway.url}/api/v1/vault/GITHUB_SYNC_PAT`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: crypto.randomUUID(), serviceName: 'github-sync' }) });
+    const response = await fetch(`${gateway.url}/api/v1/sync/push`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const result = await response.json() as any;
+    expect(response.status).toBe(502);
+    expect(result.error.message).toContain('Outbound URL rejected');
+    expect(gateway.requests()).toBe(0);
+    expect(gateway.files.size).toBe(0);
+  }
+});
+
+networkTest('sync refuses a redirect from an allowed fake GitHub into another private target', async () => {
+  let forbiddenRequests = 0;
+  const forbidden = http.createServer((_request, response) => { forbiddenRequests++; response.writeHead(200).end('{}'); });
+  remoteServers.push(forbidden);
+  await new Promise<void>(resolve => forbidden.listen(0, '127.0.0.1', resolve));
+  const forbiddenUrl = `http://127.0.0.1:${(forbidden.address() as net.AddressInfo).port}`;
+  const gateway = await startGateway({ redirect: forbiddenUrl });
+  await fetch(`${gateway.url}/api/v1/vault/GITHUB_SYNC_PAT`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ value: crypto.randomUUID(), serviceName: 'github-sync' }) });
+  const response = await fetch(`${gateway.url}/api/v1/sync/pull`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  const result = await response.json() as any;
+  expect(response.status).toBe(502);
+  expect(result.error.message).toContain('Outbound URL rejected');
+  expect(gateway.requests()).toBe(1);
+  expect(forbiddenRequests).toBe(0);
 });

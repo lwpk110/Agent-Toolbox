@@ -268,6 +268,7 @@ export default function App() {
     secretRef?: string;
     initialToolName?: string;
     initialToolDesc?: string;
+    allowPrivateNetwork?: boolean;
   }) => {
     const next = await api.addServer(payload);
     setState(next);
@@ -292,6 +293,7 @@ export default function App() {
       headers?: Record<string, string>;
       enabled?: boolean;
       secretRef?: string;
+      allowPrivateNetwork?: boolean;
     }
   ) => {
     const next = await api.updateServer(serverId, patch);
