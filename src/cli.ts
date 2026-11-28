@@ -8,6 +8,9 @@ import {
   normalizeTargetPlatform,
   uninstallAgentToolboxFromCodex,
 } from './server/adapters/codex';
+import { claudeConfigSnippet, installAgentToolboxToClaude, uninstallAgentToolboxFromClaude } from './server/adapters/claude';
+import { antigravityConfigSnippet, installAgentToolboxToAntigravity, uninstallAgentToolboxFromAntigravity } from './server/adapters/antigravity';
+import { installAgentToolboxToOpencode, opencodeConfigSnippet, uninstallAgentToolboxFromOpencode } from './server/adapters/opencode';
 import { ensureDaemonRunning, probeDaemonHealth, readDaemonLock } from './server/daemonLock';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -174,6 +177,27 @@ async function runStdioProxy(args: string[]): Promise<void> {
   });
 }
 
+
+function gatewayUrlFromPort(port: number): string {
+  return (process.env.TOOLBOX_GATEWAY_URL || `http://127.0.0.1:${port}`).replace(/\/$/, '');
+}
+
+function parseInstallTransport(host: string, raw: string | undefined): string {
+  const transport = (raw || 'stdio').toLowerCase();
+  const allowed: Record<string, string[]> = {
+    codex: ['stdio', 'http'],
+    claude: ['stdio', 'sse', 'http'],
+    antigravity: ['stdio', 'http'],
+    opencode: ['stdio', 'http'],
+  };
+  const options = allowed[host];
+  if (options && !options.includes(transport)) {
+    console.error(`Host "${host}" supports --transport ${options.join('|')}.`);
+    process.exit(1);
+  }
+  return transport;
+}
+
 async function main() {
   const [, , command, ...rest] = process.argv;
   const port = Number(getFlagValue(rest, '--port') || process.env.PORT || 3000);
@@ -189,16 +213,65 @@ async function main() {
 
   if (command === 'install') {
     const host = (getFlagValue(rest, '--host') || 'codex').toLowerCase();
-    const transport = getFlagValue(rest, '--transport') === 'http' ? 'http' : 'stdio';
+    const transport = parseInstallTransport(host, getFlagValue(rest, '--transport'));
     const platformArg = getFlagValue(rest, '--platform');
     const targetPlatform = platformArg ? normalizeTargetPlatform(platformArg) : undefined;
     const wslDistro = getFlagValue(rest, '--distro');
+    const baseUrl = gatewayUrlFromPort(port);
+    if (host === 'claude') {
+      const result = installAgentToolboxToClaude({
+        workspaceRoot: WORKSPACE_ROOT,
+        transport: transport as 'stdio' | 'sse' | 'http',
+        baseUrl,
+      });
+      if (!result.ok) {
+        console.error(result.error);
+        console.log('\nClaude Code config snippet:\n' + claudeConfigSnippet(WORKSPACE_ROOT, port));
+        process.exit(1);
+      }
+      console.log(`Installed Agent-Toolbox into Claude Code (${transport})`);
+      console.log(`Config: ${result.configPath}`);
+      if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+      return;
+    }
+    if (host === 'antigravity') {
+      const result = installAgentToolboxToAntigravity({
+        workspaceRoot: WORKSPACE_ROOT,
+        transport: transport as 'stdio' | 'http',
+        baseUrl,
+      });
+      if (!result.ok) {
+        console.error(result.error);
+        console.log('\nAntigravity config snippet:\n' + antigravityConfigSnippet(WORKSPACE_ROOT, port));
+        process.exit(1);
+      }
+      console.log(`Installed Agent-Toolbox into Antigravity (${transport})`);
+      console.log(`Config: ${result.configPath}`);
+      if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+      return;
+    }
+    if (host === 'opencode') {
+      const result = installAgentToolboxToOpencode({
+        workspaceRoot: WORKSPACE_ROOT,
+        transport: transport as 'stdio' | 'http',
+        baseUrl,
+      });
+      if (!result.ok) {
+        console.error(result.error);
+        console.log('\nOpenCode config snippet:\n' + opencodeConfigSnippet(WORKSPACE_ROOT, port));
+        process.exit(1);
+      }
+      console.log(`Installed Agent-Toolbox into OpenCode (${transport})`);
+      console.log(`Config: ${result.configPath}`);
+      if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
+      return;
+    }
     if (host !== 'codex') {
-      console.error(`Host "${host}" installation is not wired yet. Currently supported: codex.`);
+      console.error(`Host "${host}" installation is not wired yet. Currently supported: antigravity, claude, opencode, codex.`);
       process.exit(1);
     }
     const result = installAgentToolboxToCodex({
-      transport,
+      transport: transport as 'stdio' | 'http',
       port,
       workspaceRoot: WORKSPACE_ROOT,
       targetPlatform,
@@ -221,8 +294,41 @@ async function main() {
     const platformArg = getFlagValue(rest, '--platform');
     const targetPlatform = platformArg ? normalizeTargetPlatform(platformArg) : undefined;
     const wslDistro = getFlagValue(rest, '--distro');
+    if (host === 'claude') {
+      const result = uninstallAgentToolboxFromClaude();
+      if (!result.ok) {
+        console.error(result.error);
+        process.exit(1);
+      }
+      console.log(result.removed
+        ? `Removed mcpServers.agent-toolbox from ${result.configPath}`
+        : `No mcpServers.agent-toolbox entry found in ${result.configPath}`);
+      return;
+    }
+    if (host === 'antigravity') {
+      const result = uninstallAgentToolboxFromAntigravity();
+      if (!result.ok) {
+        console.error(result.error);
+        process.exit(1);
+      }
+      console.log(result.removed
+        ? `Removed mcpServers.agent-toolbox from ${result.configPath}`
+        : `No mcpServers.agent-toolbox entry found in ${result.configPath}`);
+      return;
+    }
+    if (host === 'opencode') {
+      const result = uninstallAgentToolboxFromOpencode();
+      if (!result.ok) {
+        console.error(result.error);
+        process.exit(1);
+      }
+      console.log(result.removed
+        ? `Removed mcp.servers.agent-toolbox from ${result.configPath}`
+        : `No mcp.servers.agent-toolbox entry found in ${result.configPath}`);
+      return;
+    }
     if (host !== 'codex') {
-      console.error(`Host "${host}" uninstall is not wired yet. Currently supported: codex.`);
+      console.error(`Host "${host}" uninstall is not wired yet. Currently supported: antigravity, claude, opencode, codex.`);
       process.exit(1);
     }
     const res = uninstallAgentToolboxFromCodex({ targetPlatform, wslDistro });
@@ -303,8 +409,8 @@ async function main() {
 
 Usage:
   tsx src/cli.ts serve --stdio [--host codex] [--port 3000]
-  tsx src/cli.ts install --host codex [--transport stdio|http]
-  tsx src/cli.ts uninstall --host codex
+  tsx src/cli.ts install --host antigravity|claude|opencode|codex [--transport stdio|http|sse]
+  tsx src/cli.ts uninstall --host antigravity|claude|opencode|codex
   tsx src/cli.ts import --host codex
   tsx src/cli.ts status`);
 }

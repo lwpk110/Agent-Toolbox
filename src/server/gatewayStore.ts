@@ -7,6 +7,9 @@ import { metaTools } from './metaTools';
 import { EventEmitter } from 'events';
 import { downstreamPool } from './downstreamPool';
 import { GatewayPersistence, type PersistedGatewayState } from './persistence';
+import { antigravityConfigSnippet } from './adapters/antigravity';
+import { claudeConfigSnippet } from './adapters/claude';
+import { opencodeConfigSnippet } from './adapters/opencode';
 import type {
   AuditRpcEvent,
   CacheHitPoint,
@@ -581,7 +584,7 @@ export class GatewayStore {
       latencyMs: 9,
       online: true,
       scope: 'full',
-      configSnippet: '# 在终端运行一条命令即可接入\nagent-toolbox install --host antigravity',
+      configSnippet: antigravityConfigSnippet(),
     },
     {
       id: 'claude',
@@ -589,7 +592,7 @@ export class GatewayStore {
       latencyMs: 11,
       online: true,
       scope: 'full',
-      configSnippet: '# 在终端运行\nclaude mcp add agent-toolbox -- npx agent-toolbox serve --stdio',
+      configSnippet: claudeConfigSnippet(),
     },
     {
       id: 'codex',
@@ -606,8 +609,7 @@ export class GatewayStore {
       latencyMs: 8,
       online: true,
       scope: 'audit',
-      configSnippet:
-        '// 写入 opencode.json\n{\n  "mcp": {\n    "agent-toolbox": { "type": "remote", "url": "http://127.0.0.1:3000/api/mcp/sse" }\n  }\n}',
+      configSnippet: opencodeConfigSnippet(),
     },
   ];
 
@@ -1407,6 +1409,12 @@ export class GatewayStore {
     this.applyOriginMigration();
     const codex = this.hosts.find(h => h.id === 'codex');
     if (codex) codex.configSnippet = codexConfigSnippet();
+    const antigravity = this.hosts.find(h => h.id === 'antigravity');
+    if (antigravity) antigravity.configSnippet = antigravityConfigSnippet();
+    const claude = this.hosts.find(h => h.id === 'claude');
+    if (claude) claude.configSnippet = claudeConfigSnippet();
+    const opencode = this.hosts.find(h => h.id === 'opencode');
+    if (opencode) opencode.configSnippet = opencodeConfigSnippet();
   }
 
   private persistedState(): PersistedGatewayState {
