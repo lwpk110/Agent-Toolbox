@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { afterEach, expect, test } from 'bun:test';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
@@ -5,8 +6,10 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+const token = crypto.randomUUID();
+const auth = { Authorization: `Bearer ${token}` };
 const WORKSPACE_ROOT = path.resolve(import.meta.dirname, '..');
-const NODE = spawnSync('node', ['-e', 'process.stdout.write(process.execPath)'], { encoding: 'utf8' }).stdout;
+const NODE = spawnSync('node', ['-e', "require('node:fs').writeSync(1, process.execPath)"], { encoding: 'utf8' }).stdout;
 const PROXY = path.join(WORKSPACE_ROOT, 'bin/stdio-proxy.mjs');
 const children: ChildProcess[] = [];
 const dirs: string[] = [];
@@ -62,6 +65,7 @@ function installEnv(home: string, extra: Record<string, string> = {}): NodeJS.Pr
   return {
     ...process.env,
     HOME: home,
+    TOOLBOX_MCP_TOKEN: token,
     XDG_CONFIG_HOME: path.join(home, '.config'),
     GEMINI_CONFIG_DIR: path.join(home, '.gemini', 'config'),
     TOOLBOX_DATA_FILE: path.join(home, 'gateway-state.json'),
@@ -112,6 +116,7 @@ test('install --host claude --transport sse writes the official SSE config and k
   expect(config.mcpServers.filesystem).toEqual({ command: 'node', args: ['filesystem-server.mjs'] });
   expect(config.mcpServers['agent-toolbox']).toEqual({
     type: 'sse',
+    headers: auth,
     url: 'http://127.0.0.1:3000/api/mcp/sse?host=claude-code',
   });
 });
@@ -158,6 +163,7 @@ test('install --host antigravity --transport http writes an official Streamable 
   expect(result.status).toBe(0);
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   expect(config.mcpServers['agent-toolbox']).toEqual({
+    headers: auth,
     serverUrl: 'http://127.0.0.1:4123/api/mcp?host=antigravity',
   });
 });
@@ -207,6 +213,7 @@ test('install --host opencode --transport http writes official remote Streamable
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
   expect(config.mcp.servers['agent-toolbox']).toEqual({
     type: 'remote',
+    headers: auth,
     url: 'http://127.0.0.1:4123/api/mcp?host=opencode',
   });
 });
@@ -257,7 +264,7 @@ async function hideDemo(url: string) {
   expect(visibility.ok).toBe(true);
 }
 
-async function rpc(url: string, id: string, method: string, params?: Record<string, unknown>, headers: Record<string, string> = {}) {
+async function rpc(url: string, id: string, method: string, params?: Record<string, unknown>, headers: Record<string, string> = auth) {
   const response = await fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
@@ -332,15 +339,15 @@ networkTest('Claude Code SSE config lists and calls through the written endpoint
   const config = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8'));
   expect(config.mcpServers['agent-toolbox'].type).toBe('sse');
   const sseUrl = config.mcpServers['agent-toolbox'].url as string;
-  const stream = await fetch(sseUrl, { headers: { Accept: 'text/event-stream' } });
+  const stream = await fetch(sseUrl, { headers: { ...config.mcpServers['agent-toolbox'].headers, Accept: 'text/event-stream' } });
   expect(stream.ok).toBe(true);
   stream.body?.cancel();
   const messages = new URL('/api/mcp/messages?host=claude-code', url).toString();
-  const listed = await rpc(messages, 'claude-sse-list', 'tools/list');
+  const listed = await rpc(messages, 'claude-sse-list', 'tools/list', undefined, config.mcpServers['agent-toolbox'].headers);
   expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
   const called = await rpc(messages, 'claude-sse-call', 'tools/call', {
     name: 'fixture__echo', arguments: { text: 'hello-from-claude-sse' },
-  });
+  }, config.mcpServers['agent-toolbox'].headers);
   expect(JSON.parse(called.result.content[0].text).content[0].text).toBe('hello-from-claude-sse');
   await auditHas(url, 'claude-sse-call', 'Claude Code');
 });
@@ -359,11 +366,11 @@ networkTest('Antigravity stdio and Streamable HTTP configs use the canonical aud
   expect(runCli(['install', '--host', 'antigravity', '--transport', 'http'], env).status).toBe(0);
   const httpConfig = JSON.parse(fs.readFileSync(path.join(home, '.gemini', 'config', 'mcp_config.json'), 'utf8'));
   const remoteUrl = httpConfig.mcpServers['agent-toolbox'].serverUrl as string;
-  const listed = await rpc(remoteUrl, 'agy-http-list', 'tools/list');
+  const listed = await rpc(remoteUrl, 'agy-http-list', 'tools/list', undefined, httpConfig.mcpServers['agent-toolbox'].headers);
   expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
   const called = await rpc(remoteUrl, 'agy-http-call', 'tools/call', {
     name: 'fixture__echo', arguments: { text: 'hello-from-agy-http' },
-  });
+  }, httpConfig.mcpServers['agent-toolbox'].headers);
   expect(JSON.parse(called.result.content[0].text).content[0].text).toBe('hello-from-agy-http');
   await auditHas(url, 'agy-http-call', 'Antigravity');
 });
@@ -384,11 +391,11 @@ networkTest('OpenCode local and remote configs use the canonical audit identity'
   expect(runCli(['install', '--host', 'opencode', '--transport', 'http'], env).status).toBe(0);
   const remote = JSON.parse(fs.readFileSync(path.join(home, '.config', 'opencode', 'opencode.json'), 'utf8')).mcp.servers['agent-toolbox'];
   expect(remote.type).toBe('remote');
-  const listed = await rpc(remote.url, 'oc-http-list', 'tools/list');
+  const listed = await rpc(remote.url, 'oc-http-list', 'tools/list', undefined, remote.headers);
   expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
   const called = await rpc(remote.url, 'oc-http-call', 'tools/call', {
     name: 'fixture__echo', arguments: { text: 'hello-from-oc-http' },
-  });
+  }, remote.headers);
   expect(JSON.parse(called.result.content[0].text).content[0].text).toBe('hello-from-oc-http');
   await auditHas(url, 'oc-http-call', 'OpenCode');
 });
@@ -406,11 +413,11 @@ networkTest('inbound aliases and header overrides map to canonical host names', 
     { id: 'alias-oc-header', route: '/api/mcp', headers: { 'x-toolbox-host': 'opencode' }, host: 'OpenCode' },
   ];
   for (const item of cases) {
-    const listed = await rpc(`${url}${item.route}`, `${item.id}-list`, 'tools/list', undefined, item.headers || {});
+    const listed = await rpc(`${url}${item.route}`, `${item.id}-list`, 'tools/list', undefined, { ...auth, ...item.headers });
     expect(listed.result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
     const called = await rpc(`${url}${item.route}`, `${item.id}-call`, 'tools/call', {
       name: 'fixture__echo', arguments: { text: item.id },
-    }, item.headers || {});
+    }, { ...auth, ...item.headers });
     expect(JSON.parse(called.result.content[0].text).content[0].text).toBe(item.id);
     await auditHas(url, `${item.id}-call`, item.host);
   }
@@ -428,6 +435,7 @@ networkTest('console snippets match the official install output for the three ho
   expect(visibility.ok).toBe(true);
   const state: any = await (await fetch(`${url}/api/v1/state`)).json();
   const snippet = (id: string) => state.data.hosts.find((host: any) => host.id === id).configSnippet as string;
+  for (const id of ['claude', 'antigravity', 'opencode', 'codex']) expect(snippet(id).includes(auth.Authorization)).toBe(true);
   expect(snippet('claude')).toContain('agent-toolbox install --host claude');
   expect(snippet('claude')).toContain('bin/stdio-proxy.mjs');
   expect(snippet('claude')).toContain('--host');
@@ -443,4 +451,80 @@ networkTest('console snippets match the official install output for the three ho
   expect(snippet('opencode')).toContain('mcp');
   expect(snippet('opencode')).toContain('/api/mcp?host=opencode');
   expect(snippet('opencode')).not.toContain('"agent-toolbox": { "type": "remote"');
+});
+
+test('Codex HTTP install writes official http_headers without logging the credential', () => {
+  const home = tempHome('toolbox-codex-http-');
+  const env = installEnv(home, { CODEX_HOME: path.join(home, '.codex') });
+  const installed = runCli(['install', '--host', 'codex', '--transport', 'http', '--target-platform', 'linux'], env);
+  expect(installed.status).toBe(0);
+  const config = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+  expect(config.includes(`Authorization = "Bearer ${token}"`)).toBe(true);
+  expect(installed.stdout.includes(token)).toBe(false);
+});
+
+test('Claude HTTP install and console snippet use the same official credential header', () => {
+  const home = tempHome('toolbox-claude-http-');
+  const env = installEnv(home);
+  const installed = runCli(['install', '--host', 'claude', '--transport', 'http'], env);
+  expect(installed.status).toBe(0);
+  const entry = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).mcpServers['agent-toolbox'];
+  expect(entry.type).toBe('http');
+  expect(entry.headers.Authorization === auth.Authorization).toBe(true);
+  expect(installed.stdout.includes(token)).toBe(false);
+});
+
+networkTest('Claude HTTP and Codex HTTP written credentials call a real downstream', async () => {
+  const home = tempHome('toolbox-http-e2e-');
+  const port = await allocatePort();
+  const url = `http://127.0.0.1:${port}`;
+  const { env } = await startGateway(home, port, url);
+  await hideDemo(url);
+  env.CODEX_HOME = path.join(home, '.codex');
+  for (const host of ['claude', 'codex']) {
+    expect(runCli(['install', '--host', host, '--transport', 'http'], env).status).toBe(0);
+    let endpoint: string;
+    let headers: Record<string, string>;
+    if (host === 'claude') {
+      const entry = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).mcpServers['agent-toolbox'];
+      endpoint = entry.url;
+      headers = entry.headers;
+    } else {
+      const toml = fs.readFileSync(path.join(home, '.codex', 'config.toml'), 'utf8');
+      endpoint = JSON.parse(toml.match(/^url = (".*")$/m)![1]);
+      headers = { Authorization: JSON.parse(toml.match(/Authorization = ("[^"]*")/)![1]) };
+    }
+    // Supply only the written headers; no fallback authentication.
+    const request = async (method: string, params?: unknown) => {
+      const response = await fetch(endpoint, { method: 'POST', headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: method, method, params }) });
+      expect(response.ok).toBe(true);
+      return await response.json() as any;
+    };
+    expect((await request('tools/list')).result.tools.some((tool: any) => tool.name === 'fixture__echo')).toBe(true);
+    const called = await request('tools/call', { name: 'fixture__echo', arguments: { text: 'written-config' } });
+    expect(JSON.parse(called.result.content[0].text).content[0].text).toBe('written-config');
+  }
+});
+
+test('generated remote credential persists privately outside state and lock files', () => {
+  const home = tempHome('toolbox-generated-token-');
+  const env = installEnv(home);
+  delete env.TOOLBOX_MCP_TOKEN;
+  const args = ['install', '--host', 'claude', '--transport', 'http'];
+  const first = runCli(args, env);
+  expect(first.status).toBe(0);
+  const tokenFile = path.join(home, 'mcp-token');
+  expect(fs.statSync(tokenFile).mode & 0o777).toBe(0o600);
+  const secret = fs.readFileSync(tokenFile, 'utf8');
+  expect(secret.length >= 32).toBe(true);
+  expect(first.stdout.includes(secret)).toBe(false);
+  const second = runCli(args, env);
+  expect(second.status).toBe(0);
+  expect(fs.readFileSync(tokenFile, 'utf8') === secret).toBe(true);
+  const entry = JSON.parse(fs.readFileSync(path.join(home, '.claude.json'), 'utf8')).mcpServers['agent-toolbox'];
+  expect(entry.headers.Authorization === `Bearer ${secret}`).toBe(true);
+  for (const file of ['gateway-state.json', 'toolbox.lock.json']) {
+    if (fs.existsSync(path.join(home, file))) expect(fs.readFileSync(path.join(home, file), 'utf8').includes(secret)).toBe(false);
+  }
 });

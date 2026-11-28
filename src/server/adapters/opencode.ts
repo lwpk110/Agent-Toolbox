@@ -1,3 +1,4 @@
+import { mcpHeaders } from '../mcpCredentials';
 import os from 'node:os';
 import path from 'node:path';
 import {
@@ -22,7 +23,7 @@ export function opencodeConfigPath(): string {
 
 export function opencodeInstallEntry(options: { workspaceRoot: string; transport: OpenCodeTransport; baseUrl: string }): Record<string, unknown> {
   const base = options.baseUrl.replace(/\/$/, '');
-  if (options.transport === 'http') return { type: 'remote', url: `${base}/api/mcp?host=opencode` };
+  if (options.transport === 'http') return { headers: mcpHeaders(), type: 'remote', url: `${base}/api/mcp?host=opencode` };
   const launch = stdioLaunch(options.workspaceRoot, 'opencode');
   return { type: 'local', command: [launch.command, ...launch.args] };
 }

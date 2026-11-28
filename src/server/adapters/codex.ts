@@ -1,3 +1,4 @@
+import { mcpToken } from '../mcpCredentials';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import os from 'os';
@@ -586,6 +587,7 @@ export function buildCodexTomlBlock(
     return [
       '[mcp_servers.agent-toolbox]',
       `url = ${escapeTomlString(`http://127.0.0.1:${port}/api/mcp?host=codex`)}`,
+      `http_headers = { Authorization = ${escapeTomlString(`Bearer ${mcpToken()}`)} }`,
       'startup_timeout_sec = 20',
       'tool_timeout_sec = 60',
     ].join('\n');
@@ -858,7 +860,7 @@ export function getCodexIntegrationStatus(options?: {
   const recommendedCliStdio = `codex mcp add agent-toolbox -- "${launch.command}" ${launch.args
     .map((a) => `"${a}"`)
     .join(' ')}`;
-  const recommendedCliHttp = `codex mcp add agent-toolbox --url http://127.0.0.1:${port}/api/mcp?host=codex`;
+  const recommendedCliHttp = `# ~/.codex/config.toml\n${buildCodexTomlBlock('http', { port })}`;
 
   return {
     detectedPlatform,

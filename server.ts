@@ -1,3 +1,4 @@
+import { mcpToken } from './src/server/mcpCredentials';
 import express from 'express';
 import crypto from 'node:crypto';
 import { handleMcpMessage, rpcError } from './src/server/mcpHandler';
@@ -46,9 +47,34 @@ const SKILLS_DIR = path.resolve(ROOT_DIR, 'skills');
 const PROTOTYPE_DIR = path.resolve(ROOT_DIR, 'prototype');
 const DIST_DIR = path.resolve(ROOT_DIR, 'dist');
 
+const BIND_ADDRESS = process.env.TOOLBOX_BIND_ADDRESS || '127.0.0.1';
+const ALLOW_UNAUTHENTICATED = process.argv.includes('--allow-unauthenticated');
+const isLoopback = (hostname: string) => ['localhost', '127.0.0.1', '[::1]', '::1'].includes(hostname.toLowerCase());
+const MCP_TOKEN = mcpToken();
+app.use(['/api/mcp', '/api/mcp/messages', '/api/mcp/sse'], (req, res, next) => {
+  if (!ALLOW_UNAUTHENTICATED && req.get('authorization') !== `Bearer ${MCP_TOKEN}`) {
+    res.status(401).json({ error: 'MCP authentication required' });
+    return;
+  }
+  try {
+    const host = req.get('host') || '';
+    const authority = new URL(`http://${host}`);
+    if (!host || !isLoopback(authority.hostname) || authority.username || authority.password || authority.pathname !== '/' || authority.search || authority.hash) throw new Error();
+    const origin = req.get('origin');
+    if (origin !== undefined) {
+      const parsed = new URL(origin);
+      if (!['http:', 'https:'].includes(parsed.protocol) || !isLoopback(parsed.hostname) || parsed.origin !== origin) throw new Error();
+    }
+  } catch {
+    res.status(403).json({ error: 'MCP requires a local Host and Origin' });
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '4mb', strict: false }));
 app.use((error: unknown, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  if ((req.path === '/api/mcp/messages' || req.path === '/api/mcp') && error instanceof SyntaxError) {
+  if ((req.path === '/api/mcp/messages' || req.path === '/api/mcp' || req.path === '/api/mcp/sse') && error instanceof SyntaxError) {
     res.json(rpcError(null, -32700, 'Parse error'));
     return;
   }
@@ -1092,7 +1118,7 @@ app.get('/api/mcp/sse', (req, res) => {
   attachMcpNotificationStream(req, res, true);
 });
 
-app.post('/api/mcp/messages', async (req, res) => {
+app.post(['/api/mcp/messages', '/api/mcp/sse'], async (req, res) => {
   const sessionId = req.get('mcp-session-id');
   const hostName = resolveMcpRequestHost(req, sessionId ? mcpClients.get(sessionId) : undefined);
   const response = await handleMcpMessage(req.body, { hostName });
@@ -1134,6 +1160,9 @@ if (fs.existsSync(PROTOTYPE_DIR)) {
 }
 
 async function startServer() {
+  if (ALLOW_UNAUTHENTICATED && !isLoopback(BIND_ADDRESS)) {
+    throw new Error('Unauthenticated MCP requires a loopback bind address');
+  }
   await gatewayStore.refreshMcpTools();
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -1149,14 +1178,14 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, '0.0.0.0', () => {
+  const server = app.listen(PORT, BIND_ADDRESS, () => {
     writeDaemonLock({
       pid: process.pid,
       port: PORT,
       startedAt: new Date().toISOString(),
       workspaceRoot: ROOT_DIR,
     });
-    console.log(`Agent-Toolbox gateway & console listening on http://0.0.0.0:${PORT}`);
+    console.log(`Agent-Toolbox gateway & console listening on http://${BIND_ADDRESS}:${PORT}`);
   });
 
   const shutdown = () => {
@@ -1169,6 +1198,6 @@ async function startServer() {
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  fs.writeSync(2, `Failed to start server: ${String(err)}\n`);
   process.exit(1);
 });

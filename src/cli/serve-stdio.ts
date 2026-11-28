@@ -2,6 +2,7 @@
 import { createReadStream, writeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
+import { mcpHeaders } from '../server/mcpCredentials';
 import { rpcError } from '../server/rpcError';
 
 const gatewayUrl = (process.env.TOOLBOX_GATEWAY_URL || 'http://127.0.0.1:3000').replace(/\/$/, '');
@@ -10,7 +11,7 @@ const lifetime = new AbortController();
 let stream: AbortController | undefined;
 let chain = Promise.resolve();
 const output = (message: unknown) => writeSync(1, JSON.stringify(message) + '\n');
-const headers = (): Record<string, string> => hostName ? { 'x-toolbox-host': hostName } : {};
+const headers = (): Record<string, string> => ({ ...mcpHeaders(), ...(hostName ? { 'x-toolbox-host': hostName } : {}) });
 
 async function subscribe() {
   while (!lifetime.signal.aborted) {

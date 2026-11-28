@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { mcpHeaders, mcpToken } from './server/mcpCredentials';
 import path from 'path';
 import readline from 'readline';
 import { fileURLToPath } from 'url';
@@ -40,7 +41,7 @@ async function subscribeNotifications(
   while (!abortSignal.aborted) {
     try {
       const res = await fetch(sseUrl, {
-        headers: { Accept: 'text/event-stream', 'X-Toolbox-Host': host },
+        headers: { ...mcpHeaders(), Accept: 'text/event-stream', 'X-Toolbox-Host': host },
         signal: abortSignal,
       });
       if (!res.ok || !res.body) {
@@ -125,6 +126,7 @@ async function runStdioProxy(args: string[]): Promise<void> {
         const res = await fetch(`${baseUrl}/api/mcp?host=${encodeURIComponent(host)}`, {
           method: 'POST',
           headers: {
+            ...mcpHeaders(),
             'Content-Type': 'application/json',
             Accept: 'application/json',
             'X-Toolbox-Host': host,
@@ -226,7 +228,7 @@ async function main() {
       });
       if (!result.ok) {
         console.error(result.error);
-        console.log('\nClaude Code config snippet:\n' + claudeConfigSnippet(WORKSPACE_ROOT, port));
+        console.log('\nClaude Code config snippet:\n' + claudeConfigSnippet(WORKSPACE_ROOT, port).replaceAll(mcpToken(), '<local MCP token>'));
         process.exit(1);
       }
       console.log(`Installed Agent-Toolbox into Claude Code (${transport})`);
@@ -242,7 +244,7 @@ async function main() {
       });
       if (!result.ok) {
         console.error(result.error);
-        console.log('\nAntigravity config snippet:\n' + antigravityConfigSnippet(WORKSPACE_ROOT, port));
+        console.log('\nAntigravity config snippet:\n' + antigravityConfigSnippet(WORKSPACE_ROOT, port).replaceAll(mcpToken(), '<local MCP token>'));
         process.exit(1);
       }
       console.log(`Installed Agent-Toolbox into Antigravity (${transport})`);
@@ -258,7 +260,7 @@ async function main() {
       });
       if (!result.ok) {
         console.error(result.error);
-        console.log('\nOpenCode config snippet:\n' + opencodeConfigSnippet(WORKSPACE_ROOT, port));
+        console.log('\nOpenCode config snippet:\n' + opencodeConfigSnippet(WORKSPACE_ROOT, port).replaceAll(mcpToken(), '<local MCP token>'));
         process.exit(1);
       }
       console.log(`Installed Agent-Toolbox into OpenCode (${transport})`);
@@ -279,13 +281,13 @@ async function main() {
     });
     if (!result.ok) {
       console.error(result.error || 'Failed to install Codex config.');
-      console.log('\nGenerated TOML snippet:\n' + result.tomlBlock);
+      console.log('\nGenerated TOML snippet:\n' + result.tomlBlock.replaceAll(mcpToken(), '<local MCP token>'));
       process.exit(1);
     }
     console.log(`Installed Agent-Toolbox into Codex CLI (${result.targetPlatform}, ${result.transport})`);
     console.log(`Config: ${result.configPath}`);
     if (result.backupPath) console.log(`Backup: ${result.backupPath}`);
-    console.log('\n' + result.tomlBlock);
+    console.log('\n' + result.tomlBlock.replaceAll(mcpToken(), '<local MCP token>'));
     return;
   }
 
