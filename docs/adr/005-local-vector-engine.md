@@ -1,6 +1,7 @@
 # ADR-005：采用三位一体本地嵌入式向量引擎（RAG + Memory + Smart Routing）
 
 - **状态**：`Accepted`
+- **后续修订（2026-11-28）**：目标架构不变；当前迭代按 [ADR-009](./009-lexical-search-first.md) 先交付现有词法检索，暂不引入嵌入模型与向量索引。
 - **灵感来源**：`samanhappy/mcphub`（Vector Smart Routing）+ `VeriTeknik/pluggedin-mcp-proxy`（RAG & Persistent Memory）。
 
 ## 背景与问题
